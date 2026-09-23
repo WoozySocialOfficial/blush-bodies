@@ -4536,21 +4536,27 @@ function TeachingSession({
       program: plan.brief.program,
     });
   };
-  const confirmEnd = () =>
-    Alert.alert(
-      index === movements.length - 1 ? "Complete class?" : "End class early?",
-      index === movements.length - 1
-        ? "This will create the session summary."
-        : "The unfinished movements will be recorded in the summary.",
-      [
-        { text: "Keep teaching", style: "cancel" },
-        {
-          text: index === movements.length - 1 ? "Complete" : "End early",
-          style: "destructive",
-          onPress: end,
-        },
-      ],
-    );
+  const confirmEnd = () => {
+    const completed = index === movements.length - 1;
+    const title = completed ? "Complete class?" : "End class early?";
+    const message = completed
+      ? "This will create the session summary."
+      : "The unfinished movements will be recorded in the summary.";
+
+    if (Platform.OS === "web") {
+      if (globalThis.confirm(`${title}\n\n${message}`)) end();
+      return;
+    }
+
+    Alert.alert(title, message, [
+      { text: "Keep teaching", style: "cancel" },
+      {
+        text: completed ? "Complete" : "End early",
+        style: "destructive",
+        onPress: end,
+      },
+    ]);
+  };
   useEffect(() => {
     const id = setInterval(() => {
       if (!held) setMoveTime((value) => Math.max(0, value - 1));
