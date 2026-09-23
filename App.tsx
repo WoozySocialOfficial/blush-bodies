@@ -702,16 +702,53 @@ const orderMovementsByPosition = (movements: PlanMovement[]) => {
   );
 };
 const movementArtworkSource = (movement: PlanMovement) => {
-  if (movement.id === "breath-centre" || movement.id === "closing-breath")
-    return require("./assets/movement-breath-centre.png");
-  if (movement.id === "shoulder-rolls")
-    return require("./assets/movement-shoulder-rolls.png");
-  return require("./assets/movement-side-leg-lift.png");
+  switch (movement.id) {
+    case "breath-centre":
+    case "closing-breath":
+      return require("./assets/movement-breath-centre.png");
+    case "shoulder-rolls":
+      return require("./assets/movement-shoulder-rolls.png");
+    case "cat-cow":
+      return require("./assets/movement-cat-cow.png");
+    case "roll-down":
+      return require("./assets/movement-roll-down.png");
+    case "side-leg-right":
+    case "side-leg-left":
+      return require("./assets/movement-side-leg-lift.png");
+    case "clamshell-right":
+    case "clamshell-left":
+      return require("./assets/movement-clamshell.png");
+    case "hundred":
+      return require("./assets/movement-hundred.png");
+    case "single-leg":
+      return require("./assets/movement-single-leg-stretch.png");
+    case "donkey-kick":
+      return require("./assets/movement-donkey-kick.png");
+    case "spine-twist":
+      return require("./assets/movement-spine-twist.png");
+    case "figure-four":
+      return require("./assets/movement-figure-four.png");
+    case "supine-twist":
+      return require("./assets/movement-supine-twist.png");
+    default: {
+      const group = positionGroup(movement.position);
+      if (group === "Standing")
+        return require("./assets/movement-shoulder-rolls.png");
+      if (group === "Kneeling")
+        return require("./assets/movement-cat-cow.png");
+      if (group === "Seated")
+        return require("./assets/movement-spine-twist.png");
+      if (group === "Side-lying")
+        return require("./assets/movement-side-leg-lift.png");
+      return require("./assets/movement-hundred.png");
+    }
+  }
 };
 const movementArtworkMode = (movement: PlanMovement) =>
   movement.id === "breath-centre" ||
   movement.id === "closing-breath" ||
-  movement.id === "shoulder-rolls"
+  movement.id === "shoulder-rolls" ||
+  movement.id === "roll-down"
     ? "contain"
     : "cover";
 const createPlan = (brief: PlanBrief): ClassPlan => ({
