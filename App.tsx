@@ -6353,7 +6353,7 @@ const s = StyleSheet.create({
   },
   holdText: { fontSize: 11, color: C.dark, fontWeight: "800" },
   upNext: {
-    minHeight: 82,
+    minHeight: 90,
     backgroundColor: C.card,
     borderRadius: 12,
     borderWidth: 1,
@@ -6368,7 +6368,7 @@ const s = StyleSheet.create({
   upText: { color: C.ink, fontSize: 13, fontWeight: "800", marginTop: 5 },
   upTime: { color: C.muted, fontSize: 10, marginTop: 4 },
   upNextVisual: {
-    width: 112,
+    width: 128,
     alignSelf: "stretch",
     backgroundColor: "#F4E3E3",
     overflow: "hidden",
