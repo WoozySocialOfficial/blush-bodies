@@ -1520,6 +1520,7 @@ function InstructorHome({
       <View style={s.stack}>
         {visibleSchedule.map((slot) => {
           const ready = Boolean(slot.planId);
+          const hasDraft = !ready && slot.status === "DRAFT";
           const planTitle = getPlanTitle(slot.planId);
           return (
             <Swipeable
@@ -1566,18 +1567,29 @@ function InstructorHome({
                   </Text>
                 </View>
                 <View style={s.action}>
-                  <Pill
-                    label={ready ? "READY" : slot.status}
-                    active
-                    green={ready}
-                  />
                   {ready ? (
-                    <Pressable onPress={() => start(slot)} style={s.start}>
-                      <Play size={14} color={C.white} fill={C.white} />
-                      <Text style={s.startText}>Start</Text>
-                    </Pressable>
+                    <>
+                      <Pill label="READY" active green />
+                      <Pressable onPress={() => start(slot)} style={s.start}>
+                        <Play size={14} color={C.white} fill={C.white} />
+                        <Text style={s.startText}>Start</Text>
+                      </Pressable>
+                    </>
                   ) : (
-                    <Outline label="Assign" onPress={assign} />
+                    <View style={s.planNeededAction}>
+                      <Text
+                        style={[
+                          s.planNeededText,
+                          hasDraft && s.planDraftText,
+                        ]}
+                      >
+                        {hasDraft ? "DRAFT AVAILABLE" : "PLAN NEEDED"}
+                      </Text>
+                      <Pressable onPress={assign} style={s.assignCompact}>
+                        <CalendarDays size={13} color={C.white} />
+                        <Text style={s.assignCompactText}>Assign</Text>
+                      </Pressable>
+                    </View>
                   )}
                 </View>
               </Pressable>
@@ -5919,7 +5931,26 @@ const s = StyleSheet.create({
   duration: { color: C.muted, fontSize: 10, fontWeight: "700" },
   level: { color: C.ink, fontSize: 14, fontWeight: "800" },
   week: { color: C.muted, fontSize: 11, marginTop: 5 },
-  action: { width: 95, alignItems: "flex-end", gap: 8 },
+  action: { width: 108, alignItems: "center", gap: 7 },
+  planNeededAction: { width: "100%", alignItems: "center", gap: 7 },
+  planNeededText: {
+    color: C.rose,
+    fontSize: 9,
+    fontWeight: "900",
+  },
+  planDraftText: { color: C.gold },
+  assignCompact: {
+    height: 32,
+    minWidth: 92,
+    borderRadius: 16,
+    backgroundColor: C.rose,
+    paddingHorizontal: 13,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+  },
+  assignCompactText: { color: C.white, fontSize: 11, fontWeight: "800" },
   pill: {
     minHeight: 25,
     paddingHorizontal: 13,
