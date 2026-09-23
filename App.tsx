@@ -464,6 +464,34 @@ const C = {
   darkCard: "#322C2E",
   white: "#FFFFFF",
 };
+const confirmAction = ({
+  title,
+  message,
+  confirmText,
+  onConfirm,
+  cancelText = "Cancel",
+  destructive = false,
+}: {
+  title: string;
+  message: string;
+  confirmText: string;
+  onConfirm: () => void;
+  cancelText?: string;
+  destructive?: boolean;
+}) => {
+  if (Platform.OS === "web") {
+    if (globalThis.confirm(`${title}\n\n${message}`)) onConfirm();
+    return;
+  }
+  Alert.alert(title, message, [
+    { text: cancelText, style: "cancel" },
+    {
+      text: confirmText,
+      style: destructive ? "destructive" : "default",
+      onPress: onConfirm,
+    },
+  ]);
+};
 const initialLibrary: LibraryMovement[] = [
   {
     id: "side-leg-lift",
@@ -1691,18 +1719,14 @@ function ScheduleManager({
     resetForm();
   };
   const confirmRemove = (slot: ScheduledClass) =>
-    Alert.alert(
-      "Remove class?",
-      `${classDateLabel(slot.date, true)} at ${slot.time} will be removed from the schedule.`,
-      [
-        { text: "Keep", style: "cancel" },
-        {
-          text: "Remove",
-          style: "destructive",
-          onPress: () => remove(slot.id),
-        },
-      ],
-    );
+    confirmAction({
+      title: "Remove class?",
+      message: `${classDateLabel(slot.date, true)} at ${slot.time} will be removed from the schedule.`,
+      confirmText: "Remove",
+      cancelText: "Keep",
+      destructive: true,
+      onConfirm: () => remove(slot.id),
+    });
   return (
     <ScrollView contentContainerStyle={s.page}>
       <Header title="My Schedule" back={back} />
@@ -3389,6 +3413,13 @@ function ChangePassword({
         setError(message);
         return;
       }
+      if (Platform.OS === "web") {
+        globalThis.alert(
+          "Password updated. Use your new password the next time you sign in.",
+        );
+        back();
+        return;
+      }
       Alert.alert(
         "Password updated",
         "Use your new password the next time you sign in.",
@@ -3477,14 +3508,14 @@ function DataSettings({
   reset: () => void;
 }) {
   const confirmReset = () =>
-    Alert.alert(
-      "Reset all app data?",
-      "This removes saved plans, schedules, custom movements, insights, profile details and preferences from this device.",
-      [
-        { text: "Cancel", style: "cancel" },
-        { text: "Reset everything", style: "destructive", onPress: reset },
-      ],
-    );
+    confirmAction({
+      title: "Reset all app data?",
+      message:
+        "This removes saved plans, schedules, custom movements, insights, profile details and preferences from this device.",
+      confirmText: "Reset everything",
+      destructive: true,
+      onConfirm: reset,
+    });
   const counts = [
     [savedPlans, "Saved plans"],
     [schedule, "Classes"],
@@ -4374,14 +4405,14 @@ function ManagePlan({
     setEditing(false);
   };
   const confirmDelete = () =>
-    Alert.alert(
-      "Delete saved plan?",
-      `${plan.brief.program} will be removed. Assigned classes will need another plan.`,
-      [
-        { text: "Keep plan", style: "cancel" },
-        { text: "Delete", style: "destructive", onPress: remove },
-      ],
-    );
+    confirmAction({
+      title: "Delete saved plan?",
+      message: `${plan.brief.program} will be removed. Assigned classes will need another plan.`,
+      confirmText: "Delete",
+      cancelText: "Keep plan",
+      destructive: true,
+      onConfirm: remove,
+    });
   return (
     <ScrollView contentContainerStyle={s.page}>
       <Header title="Plan Details" back={back} />
@@ -5516,21 +5547,17 @@ function BlushBodiesApp() {
               setScreen("schedule");
             }}
             remove={(slot) =>
-              Alert.alert(
-                "Delete scheduled class?",
-                `${classDateLabel(slot.date, true)} at ${slot.time} will be removed from your schedule.`,
-                [
-                  { text: "Keep class", style: "cancel" },
-                  {
-                    text: "Delete",
-                    style: "destructive",
-                    onPress: () =>
-                      setSchedule((current) =>
-                        current.filter((item) => item.id !== slot.id),
-                      ),
-                  },
-                ],
-              )
+              confirmAction({
+                title: "Delete scheduled class?",
+                message: `${classDateLabel(slot.date, true)} at ${slot.time} will be removed from your schedule.`,
+                confirmText: "Delete",
+                cancelText: "Keep class",
+                destructive: true,
+                onConfirm: () =>
+                  setSchedule((current) =>
+                    current.filter((item) => item.id !== slot.id),
+                  ),
+              })
             }
             getPlanTitle={(planId) => findPlan(planId)?.brief.program}
           />
