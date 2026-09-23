@@ -926,7 +926,7 @@ function SignIn({
   back: () => void;
   complete: (email: string, password: string) => Promise<string | null>;
   signup: () => void;
-  resetPassword: () => void;
+  resetPassword: (email: string) => void;
   role: Role;
 }) {
   const [email, setEmail] = useState("");
@@ -1011,7 +1011,10 @@ function SignIn({
           <Pressable accessibilityRole="button" onPress={signup}>
             <Text style={s.forgot}>Create a new account</Text>
           </Pressable>
-          <Pressable accessibilityRole="button" onPress={resetPassword}>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => resetPassword(email.trim().toLowerCase())}
+          >
             <Text style={s.forgot}>Forgot password?</Text>
           </Pressable>
         </View>
@@ -1029,12 +1032,14 @@ function SandboxPasswordReset({
   back,
   reset,
   role,
+  initialEmail,
 }: {
   back: () => void;
   reset: (email: string, password: string) => Promise<string | null>;
   role: Role;
+  initialEmail?: string;
 }) {
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(initialEmail ?? "");
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [error, setError] = useState("");
@@ -1066,6 +1071,13 @@ function SandboxPasswordReset({
       const message = await reset(normalizedEmail, password);
       if (message) {
         setError(message);
+        return;
+      }
+      if (Platform.OS === "web") {
+        globalThis.alert(
+          "Your local test password was updated. You can sign in now.",
+        );
+        back();
         return;
       }
       Alert.alert(
@@ -4742,6 +4754,7 @@ function BlushBodiesApp() {
   );
   const [hydrated, setHydrated] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
+  const [resetEmail, setResetEmail] = useState("");
   useEffect(() => {
     void Promise.all([
       AsyncStorage.removeItem(LEGACY_STORAGE_KEY),
@@ -5134,7 +5147,9 @@ function BlushBodiesApp() {
       if (!credential) return "No account was found. Create an account first.";
       const passwordHash = await hashPassword(password, credential.salt);
       if (passwordHash !== credential.passwordHash)
-        return "The email or password is incorrect.";
+        return Platform.OS === "web"
+          ? "This password does not match the test account saved in this browser. Use Forgot password below to reset it."
+          : "The email or password is incorrect.";
       await loadWorkspace({
         name: credential.name,
         email: credential.email,
@@ -5323,7 +5338,10 @@ function BlushBodiesApp() {
         role="instructor"
         back={() => setScreen("welcome")}
         signup={() => setScreen("signup")}
-        resetPassword={() => setScreen("resetPassword")}
+        resetPassword={(email) => {
+          setResetEmail(email);
+          setScreen("resetPassword");
+        }}
         complete={(email, password) =>
           authenticate("instructor", email, password)
         }
@@ -5333,6 +5351,7 @@ function BlushBodiesApp() {
     return (
       <SandboxPasswordReset
         role="instructor"
+        initialEmail={resetEmail}
         back={() => setScreen("signin")}
         reset={(email, password) =>
           resetSandboxPassword("instructor", email, password)
