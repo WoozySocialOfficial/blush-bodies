@@ -41,6 +41,7 @@ import {
   Alert,
   Animated,
   Easing,
+  Image,
   Modal,
   Platform,
   Pressable,
@@ -4633,8 +4634,12 @@ function TeachingSession({
           Step {index + 1} of {movements.length}
         </Text>
         <View style={s.movementArtwork}>
-          <UserRound size={42} color="#A57884" />
-          <Text style={s.movementArtworkLabel}>movement visual</Text>
+          <Image
+            source={require("./assets/movement-side-leg-lift.png")}
+            style={s.movementArtworkImage}
+            resizeMode="cover"
+            accessibilityLabel={`Demonstration image for ${current.title}`}
+          />
           <Text style={s.movementArtworkPosition}>{current.position}</Text>
         </View>
         <View style={s.movementCue}>
@@ -4686,8 +4691,12 @@ function TeachingSession({
         </View>
         {upcoming ? (
           <View style={s.upNextVisual}>
-            <UserRound size={24} color="#A57884" />
-            <Text style={s.upNextVisualText}>movement visual</Text>
+            <Image
+              source={require("./assets/movement-side-leg-lift.png")}
+              style={s.upNextVisualImage}
+              resizeMode="cover"
+              accessibilityLabel={`Preview image for ${upcoming.title}`}
+            />
           </View>
         ) : (
           <ChevronRight size={20} color="#D9C8CC" />
@@ -6241,10 +6250,9 @@ const s = StyleSheet.create({
     borderRadius: 13,
     backgroundColor: "#F4E3E3",
     marginTop: 16,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
+    overflow: "hidden",
   },
+  movementArtworkImage: { width: "100%", height: "100%" },
   movementArtworkRing: {
     width: 58,
     height: 58,
@@ -6257,9 +6265,16 @@ const s = StyleSheet.create({
   },
   movementArtworkLabel: { color: C.muted, fontSize: 13 },
   movementArtworkPosition: {
-    color: C.rose,
+    position: "absolute",
+    left: 10,
+    bottom: 10,
+    color: C.ink,
     fontSize: 10,
     fontWeight: "800",
+    backgroundColor: "rgba(255,255,255,0.9)",
+    borderRadius: 10,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
   },
   movementCardTitle: {
     color: C.ink,
@@ -6356,10 +6371,9 @@ const s = StyleSheet.create({
     width: 112,
     alignSelf: "stretch",
     backgroundColor: "#F4E3E3",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 3,
+    overflow: "hidden",
   },
+  upNextVisualImage: { width: "100%", height: "100%" },
   upNextVisualText: { color: C.muted, fontSize: 9 },
   endClass: {
     height: 38,
