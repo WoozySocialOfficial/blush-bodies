@@ -1,6 +1,9 @@
 {
   "name": "blush_bodies_app",
   "version": "1.0.0",
+  "engines": {
+    "node": "22.x"
+  },
   "main": "index.ts",
   "dependencies": {
     "@expo/metro-runtime": "~57.0.16",
