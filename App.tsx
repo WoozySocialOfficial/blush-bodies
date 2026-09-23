@@ -701,6 +701,19 @@ const orderMovementsByPosition = (movements: PlanMovement[]) => {
       .map(({ movement }) => movement),
   );
 };
+const movementArtworkSource = (movement: PlanMovement) => {
+  if (movement.id === "breath-centre" || movement.id === "closing-breath")
+    return require("./assets/movement-breath-centre.png");
+  if (movement.id === "shoulder-rolls")
+    return require("./assets/movement-shoulder-rolls.png");
+  return require("./assets/movement-side-leg-lift.png");
+};
+const movementArtworkMode = (movement: PlanMovement) =>
+  movement.id === "breath-centre" ||
+  movement.id === "closing-breath" ||
+  movement.id === "shoulder-rolls"
+    ? "contain"
+    : "cover";
 const createPlan = (brief: PlanBrief): ClassPlan => ({
   id: `BB-${Date.now()}`,
   version: 1,
@@ -4678,9 +4691,9 @@ function TeachingSession({
         </Text>
         <View style={s.movementArtwork}>
           <Image
-            source={require("./assets/movement-side-leg-lift.png")}
+            source={movementArtworkSource(current)}
             style={s.movementArtworkImage}
-            resizeMode="cover"
+            resizeMode={movementArtworkMode(current)}
             accessibilityLabel={`Demonstration image for ${current.title}`}
           />
           <Text style={s.movementArtworkPosition}>{current.position}</Text>
@@ -4735,9 +4748,9 @@ function TeachingSession({
         {upcoming ? (
           <View style={s.upNextVisual}>
             <Image
-              source={require("./assets/movement-side-leg-lift.png")}
+              source={movementArtworkSource(upcoming)}
               style={s.upNextVisualImage}
-              resizeMode="cover"
+              resizeMode={movementArtworkMode(upcoming)}
               accessibilityLabel={`Preview image for ${upcoming.title}`}
             />
           </View>
