@@ -3,7 +3,6 @@ import Constants from "expo-constants";
 import * as Crypto from "expo-crypto";
 import * as Haptics from "expo-haptics";
 import * as SecureStore from "expo-secure-store";
-import * as Speech from "expo-speech";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Calendar, type DateData } from "react-native-calendars";
 import {
@@ -134,7 +133,6 @@ type LibraryMovement = {
 };
 type InstructorPreferences = {
   teachingMode: "Guided" | "Minimal";
-  sound: boolean;
   vibration: boolean;
   offline: boolean;
 };
@@ -2604,7 +2602,7 @@ function Teach({
   ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   return (
     <View style={s.teach}>
-      <StatusBar style="light" />
+      <StatusBar style="dark" />
       <View style={s.teachTop}>
         <Pressable onPress={exit}>
           <X size={21} color="#EEE0E3" />
@@ -3159,7 +3157,7 @@ function Profile({
     setError("");
     setEditing(false);
   };
-  const toggle = (key: "sound" | "vibration" | "offline") =>
+  const toggle = (key: "vibration" | "offline") =>
     updatePreferences({ ...preferences, [key]: !preferences[key] });
   const Toggle = ({
     value,
@@ -3276,10 +3274,6 @@ function Profile({
       <View>
         <Text style={s.group}>PREFERENCES</Text>
         <View style={s.settings}>
-          <View style={s.setting}>
-            <Text style={s.settingText}>Sound cues</Text>
-            <Toggle value={preferences.sound} onPress={() => toggle("sound")} />
-          </View>
           <View style={s.setting}>
             <Text style={s.settingText}>Vibration cues</Text>
             <Toggle
@@ -4485,24 +4479,12 @@ function TeachingSession({
   const movements = orderMovementsByPosition(plan.movements);
   const [held, setHeld] = useState(false);
   const [index, setIndex] = useState(0);
-  const [step, setStep] = useState(1);
   const [startedAt] = useState(Date.now());
-  const [classTime, setClassTime] = useState(planTotal(plan));
   const [moveTime, setMoveTime] = useState(movements[0].duration);
   const cardOffset = useRef(new Animated.Value(0)).current;
   const cardOpacity = useRef(new Animated.Value(1)).current;
   const transitioning = useRef(false);
   const current = movements[index];
-  const guided = preferences.teachingMode === "Guided";
-  const speakCurrent = () => {
-    if (preferences.sound) {
-      void Speech.stop();
-      Speech.speak(
-        guided ? `${current.title}. ${current.cue}` : current.title,
-        { rate: 0.9 },
-      );
-    }
-  };
   const go = (next: number) => {
     const safe = Math.max(0, Math.min(movements.length - 1, next));
     if (safe === index || transitioning.current) return;
@@ -4521,7 +4503,6 @@ function TeachingSession({
       }),
     ]).start(() => {
       setIndex(safe);
-      setStep(1);
       setMoveTime(movements[safe].duration);
       cardOffset.setValue(52);
       Animated.parallel([
@@ -4572,45 +4553,22 @@ function TeachingSession({
     );
   useEffect(() => {
     const id = setInterval(() => {
-      setClassTime(
-        Math.max(
-          0,
-          planTotal(plan) - Math.floor((Date.now() - startedAt) / 1000),
-        ),
-      );
       if (!held) setMoveTime((value) => Math.max(0, value - 1));
     }, 1000);
     return () => clearInterval(id);
-  }, [held, plan, startedAt]);
+  }, [held]);
   useEffect(() => {
     if (moveTime === 0 && !held && index < movements.length - 1) go(index + 1);
   }, [moveTime, held, index]);
   useEffect(() => {
     if (preferences.vibration)
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    speakCurrent();
-    return () => {
-      void Speech.stop();
-    };
-  }, [index]);
+  }, [index, preferences.vibration]);
   const nextStep = () => {
-    if (!guided) {
-      if (index < movements.length - 1) go(index + 1);
-      else confirmEnd();
-      return;
-    }
-    if (step < 3) setStep((value) => value + 1);
-    else if (index < movements.length - 1) go(index + 1);
+    if (index < movements.length - 1) go(index + 1);
     else confirmEnd();
   };
-  const toggleHold = () => {
-    if (!held) {
-      void Speech.stop();
-    } else {
-      speakCurrent();
-    }
-    setHeld((value) => !value);
-  };
+  const toggleHold = () => setHeld((value) => !value);
   const upcoming = movements[index + 1];
   const classLevel = plan.brief.program.toLowerCase().includes("intermediate")
     ? "Intermediate"
@@ -4618,139 +4576,80 @@ function TeachingSession({
         plan.brief.program.toLowerCase().includes("advanced")
       ? "Advanced"
       : "Beginner";
-  const cardPalette =
-    current.phase === "Warm-up"
-      ? { backgroundColor: "#F1D8DE", borderColor: "#C78B9A" }
-      : current.phase === "Main"
-        ? { backgroundColor: "#DDE9E1", borderColor: "#789283" }
-        : { backgroundColor: "#E3DDEA", borderColor: "#9787A8" };
-  const finishTime = new Date(
-    startedAt + planTotal(plan) * 1000,
-  ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   return (
     <View style={s.teach}>
-      <StatusBar style="light" />
+      <StatusBar style="dark" />
       <View style={s.teachTop}>
-        <Pressable
-          onPress={() => {
-            void Speech.stop();
-            exit();
-          }}
-        >
+        <Pressable onPress={exit} style={s.teachClose}>
           <X size={21} color="#EEE0E3" />
         </Pressable>
-        <Text style={s.context}>
-          {plan.brief.program.toUpperCase()} / {plan.brief.week.toUpperCase()} /{" "}
-          {plan.brief.day.toUpperCase()}
-        </Text>
-        <Pill label={preferences.teachingMode.toUpperCase()} />
-      </View>
-      <View style={s.row}>
-        <View>
-          <Text style={s.light}>Class remaining / finish {finishTime}</Text>
-          <Text style={s.clock}>{fmt(classTime)}</Text>
+        <View style={s.flex}>
+          <Text style={s.teachPlanMeta}>
+            {classLevel} · {plan.brief.week} · {plan.brief.day}
+          </Text>
+          <Text style={s.teachSequence}>
+            {current.phase === "Main" ? "Main Sequence" : current.phase}
+          </Text>
         </View>
-        <Text style={s.counter}>
-          {index + 1} / {movements.length}
-        </Text>
       </View>
-      <View style={s.track}>
-        <View
-          style={[
-            s.fill,
-            { width: `${((index + 1) / movements.length) * 100}%` },
-          ]}
-        />
+      <View style={s.teachTimerBlock}>
+        <Text style={s.teachTimer}>{fmt(moveTime)}</Text>
+        <Text style={s.teachTimerTotal}>/ {fmt(current.duration)}</Text>
       </View>
       <Animated.View
         style={[
           s.movementCard,
-          cardPalette,
           {
             opacity: cardOpacity,
             transform: [{ translateY: cardOffset }],
           },
         ]}
       >
-        <View style={s.row}>
-          <View>
-            <Text style={s.movementCardSeries}>
-              {classLevel.toUpperCase()} / {plan.brief.week.toUpperCase()} /{" "}
-              {plan.brief.day.toUpperCase()}
-            </Text>
-            <Text style={s.movementCardCount}>
-              MOVEMENT {String(index + 1).padStart(2, "0")}
-            </Text>
-          </View>
-          <View style={s.movementPhaseBadge}>
-            <Text style={s.movementPhaseText}>
-              {current.phase.toUpperCase()}
-            </Text>
-          </View>
-        </View>
-        <View style={s.movementArtwork}>
-          <View style={s.movementArtworkRing}>
-            <UserRound size={38} color={C.rose} />
-          </View>
-          <View style={s.flex}>
-            <Text style={s.movementArtworkLabel}>POSITION</Text>
-            <Text style={s.movementArtworkPosition}>
-              {positionGroup(current.position)}
-            </Text>
-          </View>
+        <View style={s.movementPhaseBadge}>
+          <Text style={s.movementPhaseText}>
+            {current.phase === "Main" ? "MAIN SEQUENCE" : current.phase.toUpperCase()}
+          </Text>
         </View>
         <Text style={s.movementCardTitle}>{current.title}</Text>
-        <View style={s.movementMetaRow}>
-          <View style={s.movementMetaItem}>
-            <MapPin size={15} color={C.rose} />
-            <Text style={s.movementMetaText}>{current.position}</Text>
-          </View>
-          <View style={s.movementMetaItem}>
-            <Clock3 size={15} color={C.rose} />
-            <Text style={s.movementMetaText}>{fmt(current.duration)}</Text>
-          </View>
+        <Text style={s.movementCardCount}>
+          Step {index + 1} of {movements.length}
+        </Text>
+        <View style={s.movementArtwork}>
+          <UserRound size={42} color="#A57884" />
+          <Text style={s.movementArtworkLabel}>movement visual</Text>
+          <Text style={s.movementArtworkPosition}>{current.position}</Text>
         </View>
-        {guided ? (
-          <View style={s.movementCue}>
-            <Text style={s.movementCueLabel}>
-              ACTIVE CUE / STEP {step} OF 3
-            </Text>
-            <Text style={s.movementCueText}>
-              {step === 1
-                ? `Set up in ${current.position.toLowerCase()}.`
-                : step === 2
-                  ? current.cue
-                  : "Finish with control and prepare to transition."}
-            </Text>
-          </View>
-        ) : null}
-        <View style={s.movementCardTimer}>
-          <Text style={s.movementTimerLabel}>TIME REMAINING</Text>
-          <Text style={s.movementTimerValue}>{fmt(moveTime)}</Text>
+        <View style={s.movementCue}>
+          <Text style={s.movementCueText}>{current.cue}</Text>
         </View>
       </Animated.View>
       <View style={s.controls}>
-        <Pressable
-          onPress={() => go(index - 1)}
-          disabled={index === 0}
-          style={[s.navControl, index === 0 && s.disabled]}
-        >
-          <ChevronLeft size={24} color={C.white} />
-        </Pressable>
-        <Pressable onPress={toggleHold} style={s.hold}>
-          {held ? (
-            <Play size={23} color={C.dark} fill={C.dark} />
-          ) : (
-            <Pause size={23} color={C.dark} fill={C.dark} />
-          )}
-          <Text style={s.holdText}>{held ? "Resume cues" : "Hold cues"}</Text>
-        </Pressable>
-        <Pressable onPress={nextStep} style={s.navControl}>
-          <ChevronRight size={24} color={C.white} />
-          <Text style={s.controlLabel}>
-            {guided ? "Next step" : "Next movement"}
-          </Text>
-        </Pressable>
+        <View style={s.teachControlGroup}>
+          <Pressable
+            onPress={() => go(index - 1)}
+            disabled={index === 0}
+            style={[s.navControl, index === 0 && s.disabled]}
+          >
+            <ChevronLeft size={22} color={C.ink} />
+          </Pressable>
+          <Text style={s.controlLabel}>Previous</Text>
+        </View>
+        <View style={s.teachControlGroup}>
+          <Pressable onPress={toggleHold} style={s.hold}>
+            {held ? (
+              <Play size={21} color={C.white} fill={C.white} />
+            ) : (
+              <Pause size={21} color={C.white} fill={C.white} />
+            )}
+          </Pressable>
+          <Text style={s.controlLabel}>{held ? "Resume" : "Hold"}</Text>
+        </View>
+        <View style={s.teachControlGroup}>
+          <Pressable onPress={nextStep} style={s.navControl}>
+            <ChevronRight size={22} color={C.ink} />
+          </Pressable>
+          <Text style={s.controlLabel}>Next</Text>
+        </View>
       </View>
       <Pressable
         onPress={() => (upcoming ? go(index + 1) : confirmEnd())}
@@ -4758,20 +4657,23 @@ function TeachingSession({
       >
         <View style={s.flex}>
           <Text style={s.nextMovementLabel}>
-            {upcoming
-              ? positionGroup(upcoming.position) ===
-                positionGroup(current.position)
-                ? "UP NEXT / SAME POSITION"
-                : `UP NEXT / CHANGE TO ${positionGroup(upcoming.position).toUpperCase()}`
-              : "SESSION COMPLETE"}
+            {upcoming ? "UP NEXT" : "SESSION COMPLETE"}
           </Text>
           <Text style={s.upText}>
             {upcoming
-              ? `${upcoming.title} / ${fmt(upcoming.duration)} / ${upcoming.position}`
+              ? upcoming.title
               : "Complete class and review summary"}
           </Text>
+          {upcoming ? <Text style={s.upTime}>{fmt(upcoming.duration)}</Text> : null}
         </View>
-        <ChevronRight size={20} color="#D9C8CC" />
+        {upcoming ? (
+          <View style={s.upNextVisual}>
+            <UserRound size={24} color="#A57884" />
+            <Text style={s.upNextVisualText}>movement visual</Text>
+          </View>
+        ) : (
+          <ChevronRight size={20} color="#D9C8CC" />
+        )}
       </Pressable>
       <Pressable onPress={confirmEnd} style={s.endClass}>
         <Text style={s.endClassText}>End Class</Text>
@@ -4822,7 +4724,6 @@ function BlushBodiesApp() {
   const [instructorPreferences, setInstructorPreferences] =
     useState<InstructorPreferences>({
       teachingMode: "Guided",
-      sound: true,
       vibration: true,
       offline: false,
     });
@@ -5153,7 +5054,6 @@ function BlushBodiesApp() {
     setSelectedMovement(initialLibrary[0]);
     setInstructorPreferences({
       teachingMode: "Guided",
-      sound: true,
       vibration: true,
       offline: false,
     });
@@ -5201,7 +5101,6 @@ function BlushBodiesApp() {
     setInstructorPreferences(
       stored.instructorPreferences ?? {
         teachingMode: "Guided",
-        sound: true,
         vibration: true,
         offline: false,
       },
@@ -6231,12 +6130,30 @@ const s = StyleSheet.create({
   transitionText: { color: C.ink, fontSize: 12, fontWeight: "800" },
   teach: {
     flex: 1,
-    backgroundColor: C.dark,
+    backgroundColor: C.bg,
     paddingTop:
       Platform.OS === "android" ? (NativeStatusBar.currentHeight ?? 24) : 44,
-    paddingHorizontal: 24,
+    paddingHorizontal: 20,
   },
-  teachTop: { height: 42, flexDirection: "row", alignItems: "center", gap: 12 },
+  teachTop: {
+    minHeight: 62,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  teachClose: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: C.ink,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  teachPlanMeta: { color: C.ink, fontSize: 13, fontWeight: "800" },
+  teachSequence: { color: C.muted, fontSize: 11, marginTop: 3 },
+  teachTimerBlock: { alignItems: "center", paddingVertical: 8 },
+  teachTimer: { color: C.ink, fontSize: 40, fontWeight: "900" },
+  teachTimerTotal: { color: C.muted, fontSize: 13, marginTop: 1 },
   context: { flex: 1, color: "#E7D9DC", fontSize: 10, fontWeight: "800" },
   light: { color: "#CBC0C2", fontSize: 11 },
   clock: { color: C.white, fontSize: 31, fontWeight: "800" },
@@ -6267,38 +6184,41 @@ const s = StyleSheet.create({
   movementCard: {
     flex: 1,
     minHeight: 280,
-    maxHeight: 430,
-    marginTop: 16,
-    borderWidth: 3,
-    borderRadius: 8,
-    padding: 16,
-    gap: 10,
+    maxHeight: 440,
+    marginTop: 8,
+    backgroundColor: C.card,
+    borderWidth: 1,
+    borderColor: C.line,
+    borderRadius: 18,
+    padding: 18,
     overflow: "hidden",
   },
   movementCardSeries: { color: C.rose, fontSize: 10, fontWeight: "900" },
   movementCardCount: {
     color: C.muted,
-    fontSize: 9,
-    fontWeight: "800",
-    marginTop: 3,
+    fontSize: 11,
+    fontWeight: "700",
+    marginTop: 6,
   },
   movementPhaseBadge: {
-    minHeight: 28,
-    borderRadius: 6,
-    backgroundColor: "rgba(255,255,255,0.72)",
-    paddingHorizontal: 10,
+    minHeight: 25,
+    alignSelf: "flex-start",
+    borderRadius: 13,
+    backgroundColor: "#F5E6E8",
+    paddingHorizontal: 9,
     alignItems: "center",
     justifyContent: "center",
   },
-  movementPhaseText: { color: C.ink, fontSize: 9, fontWeight: "900" },
+  movementPhaseText: { color: C.rose, fontSize: 9, fontWeight: "900" },
   movementArtwork: {
-    height: 88,
-    borderRadius: 6,
-    backgroundColor: "rgba(255,255,255,0.58)",
-    paddingHorizontal: 16,
-    flexDirection: "row",
+    flex: 1,
+    minHeight: 120,
+    borderRadius: 13,
+    backgroundColor: "#F4E3E3",
+    marginTop: 16,
     alignItems: "center",
-    gap: 14,
+    justifyContent: "center",
+    gap: 6,
   },
   movementArtworkRing: {
     width: 58,
@@ -6310,14 +6230,18 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  movementArtworkLabel: { color: C.muted, fontSize: 9, fontWeight: "800" },
+  movementArtworkLabel: { color: C.muted, fontSize: 13 },
   movementArtworkPosition: {
-    color: C.ink,
-    fontSize: 19,
-    fontWeight: "900",
-    marginTop: 3,
+    color: C.rose,
+    fontSize: 10,
+    fontWeight: "800",
   },
-  movementCardTitle: { color: C.ink, fontSize: 27, fontWeight: "900" },
+  movementCardTitle: {
+    color: C.ink,
+    fontSize: 23,
+    fontWeight: "900",
+    marginTop: 5,
+  },
   movementMetaRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   movementMetaItem: {
     minHeight: 30,
@@ -6330,18 +6254,16 @@ const s = StyleSheet.create({
   },
   movementMetaText: { color: C.ink, fontSize: 10, fontWeight: "800" },
   movementCue: {
-    flex: 1,
-    minHeight: 58,
-    borderTopWidth: 1,
-    borderTopColor: "rgba(55,49,51,0.16)",
-    paddingTop: 9,
+    minHeight: 56,
+    justifyContent: "center",
+    paddingTop: 12,
   },
   movementCueLabel: { color: C.rose, fontSize: 9, fontWeight: "900" },
   movementCueText: {
     color: C.ink,
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: "800",
-    marginTop: 5,
+    lineHeight: 20,
   },
   movementCardTimer: {
     minHeight: 42,
@@ -6364,54 +6286,63 @@ const s = StyleSheet.create({
   controls: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
-    marginTop: 16,
+    justifyContent: "space-around",
+    marginTop: 15,
   },
+  teachControlGroup: { width: 76, alignItems: "center", gap: 6 },
   navControl: {
-    flex: 1,
-    height: 65,
-    borderWidth: 1,
-    borderColor: "#52494C",
-    borderRadius: 16,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: "#EEE7E5",
     alignItems: "center",
     justifyContent: "center",
   },
   controlLabel: {
-    color: C.white,
-    fontSize: 9,
-    fontWeight: "800",
-    marginTop: 3,
+    color: C.muted,
+    fontSize: 10,
+    fontWeight: "700",
   },
   hold: {
-    flex: 1.45,
-    height: 72,
-    borderRadius: 18,
-    backgroundColor: "#EBCFD4",
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    backgroundColor: C.rose,
     alignItems: "center",
     justifyContent: "center",
-    gap: 4,
   },
   holdText: { fontSize: 11, color: C.dark, fontWeight: "800" },
   upNext: {
-    minHeight: 72,
-    backgroundColor: "#40373A",
-    borderRadius: 8,
-    borderWidth: 2,
-    borderColor: "#806E56",
-    paddingHorizontal: 16,
+    minHeight: 82,
+    backgroundColor: C.card,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: C.line,
+    paddingLeft: 14,
     flexDirection: "row",
     alignItems: "center",
-    marginTop: 10,
+    marginTop: 12,
+    overflow: "hidden",
   },
-  nextMovementLabel: { color: "#DFC9A5", fontSize: 9, fontWeight: "900" },
-  upText: { color: C.white, fontSize: 12, fontWeight: "800", marginTop: 4 },
+  nextMovementLabel: { color: C.rose, fontSize: 9, fontWeight: "900" },
+  upText: { color: C.ink, fontSize: 13, fontWeight: "800", marginTop: 5 },
+  upTime: { color: C.muted, fontSize: 10, marginTop: 4 },
+  upNextVisual: {
+    width: 112,
+    alignSelf: "stretch",
+    backgroundColor: "#F4E3E3",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 3,
+  },
+  upNextVisualText: { color: C.muted, fontSize: 9 },
   endClass: {
     height: 38,
     alignItems: "center",
     justifyContent: "center",
     marginTop: 8,
   },
-  endClassText: { color: "#D9C8CC", fontSize: 11, fontWeight: "800" },
+  endClassText: { color: C.rose, fontSize: 11, fontWeight: "800" },
   summaryHero: {
     minHeight: 170,
     backgroundColor: C.card,
