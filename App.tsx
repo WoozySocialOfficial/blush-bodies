@@ -50,6 +50,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from "react-native";
 
@@ -5728,23 +5729,29 @@ function BlushBodiesApp() {
 const s = StyleSheet.create({
   appRoot: {
     flex: 1,
+    width: "100%",
+    minWidth: 0,
     backgroundColor: Platform.OS === "web" ? "#EDE7E5" : C.bg,
     alignItems: Platform.OS === "web" ? "center" : "stretch",
+    overflow: "hidden",
   },
   appViewport: {
     flex: 1,
     width: "100%",
+    minWidth: 0,
     maxWidth: Platform.OS === "web" ? 480 : undefined,
     backgroundColor: C.bg,
+    overflow: "hidden",
   },
-  app: { flex: 1, backgroundColor: C.bg },
-  flex: { flex: 1 },
+  app: { flex: 1, minWidth: 0, backgroundColor: C.bg },
+  flex: { flex: 1, minWidth: 0 },
   top: {
     height:
       Platform.OS === "android" ? (NativeStatusBar.currentHeight ?? 24) : 44,
   },
   page: { paddingHorizontal: 24, paddingBottom: 28, gap: 20 },
   row: {
+    minWidth: 0,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
@@ -5934,6 +5941,8 @@ const s = StyleSheet.create({
   },
   planText: { color: C.white, fontSize: 12, fontWeight: "800" },
   todayPlan: {
+    width: "100%",
+    minWidth: 0,
     minHeight: 91,
     borderRadius: 17,
     backgroundColor: C.card,
@@ -5943,6 +5952,8 @@ const s = StyleSheet.create({
     gap: 12,
   },
   classCard: {
+    width: "100%",
+    minWidth: 0,
     minHeight: 86,
     borderRadius: 15,
     backgroundColor: C.card,
@@ -6032,7 +6043,13 @@ const s = StyleSheet.create({
     borderTopColor: C.line,
     flexDirection: "row",
   },
-  navItem: { flex: 1, alignItems: "center", justifyContent: "center", gap: 4 },
+  navItem: {
+    flex: 1,
+    minWidth: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+  },
   navLabel: { color: C.muted, fontSize: 10, fontWeight: "600" },
   navLabelOn: { color: C.rose, fontWeight: "800" },
   steps: { height: 48, flexDirection: "row", justifyContent: "space-around" },
@@ -6846,9 +6863,16 @@ const s = StyleSheet.create({
 });
 
 export default function App() {
+  const { width } = useWindowDimensions();
+  const webPreviewWidth = Platform.OS === "web" ? Math.min(width, 480) : null;
   return (
     <GestureHandlerRootView style={s.appRoot}>
-      <View style={s.appViewport}>
+      <View
+        style={[
+          s.appViewport,
+          webPreviewWidth !== null && { width: webPreviewWidth },
+        ]}
+      >
         <BlushBodiesApp />
       </View>
     </GestureHandlerRootView>
