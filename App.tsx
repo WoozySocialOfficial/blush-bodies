@@ -702,7 +702,9 @@ const orderMovementsByPosition = (movements: PlanMovement[]) => {
       .map(({ movement }) => movement),
   );
 };
-const movementArtworkSource = (movement: PlanMovement) => {
+const movementArtworkSource = (
+  movement: Pick<PlanMovement, "id" | "position">,
+) => {
   switch (movement.id) {
     case "breath-centre":
     case "closing-breath":
@@ -713,15 +715,18 @@ const movementArtworkSource = (movement: PlanMovement) => {
       return require("./assets/movement-cat-cow.png");
     case "roll-down":
       return require("./assets/movement-roll-down.png");
+    case "side-leg-lift":
     case "side-leg-right":
     case "side-leg-left":
       return require("./assets/movement-side-leg-lift.png");
+    case "clamshell":
     case "clamshell-right":
     case "clamshell-left":
       return require("./assets/movement-clamshell.png");
     case "hundred":
       return require("./assets/movement-hundred.png");
     case "single-leg":
+    case "single-leg-stretch":
       return require("./assets/movement-single-leg-stretch.png");
     case "donkey-kick":
       return require("./assets/movement-donkey-kick.png");
@@ -745,7 +750,9 @@ const movementArtworkSource = (movement: PlanMovement) => {
     }
   }
 };
-const movementArtworkMode = (movement: PlanMovement) =>
+const movementArtworkMode = (
+  movement: Pick<PlanMovement, "id" | "position">,
+) =>
   movement.id === "breath-centre" ||
   movement.id === "closing-breath" ||
   movement.id === "shoulder-rolls" ||
@@ -973,7 +980,13 @@ function Nav({ tab, setTab }: { tab: Tab; setTab: (tab: Tab) => void }) {
     </View>
   );
 }
-function Welcome({ choose }: { choose: () => void }) {
+function Welcome({
+  getStarted,
+  logIn,
+}: {
+  getStarted: () => void;
+  logIn: () => void;
+}) {
   return (
     <View style={s.welcome}>
       <StatusBar style="dark" />
@@ -990,8 +1003,8 @@ function Welcome({ choose }: { choose: () => void }) {
         </Text>
       </View>
       <View style={s.welcomeActions}>
-        <Main label="Get Started" onPress={choose} />
-        <Outline label="Log In" onPress={choose} />
+        <Main label="Get Started" onPress={getStarted} />
+        <Outline label="Log In" onPress={logIn} />
       </View>
     </View>
   );
@@ -1475,9 +1488,7 @@ function Home({
 function InstructorHome({
   schedule,
   account,
-  plan,
   create,
-  teach,
   assign,
   start,
   modify,
@@ -1486,9 +1497,7 @@ function InstructorHome({
 }: {
   schedule: ScheduledClass[];
   account: Account;
-  plan: ClassPlan;
   create: () => void;
-  teach: () => void;
   assign: () => void;
   start: (slot: ScheduledClass) => void;
   modify: (slot: ScheduledClass) => void;
@@ -1497,11 +1506,20 @@ function InstructorHome({
 }) {
   const firstName = account.name.split(" ")[0];
   const [selectedDate, setSelectedDate] = useState(localDateKey());
+  const swipeBlockedUntil = useRef<Record<string, number>>({});
   const visibleSchedule = schedule.filter((item) => item.date === selectedDate);
   const readyCount = visibleSchedule.filter((item) => item.planId).length;
   const hour = new Date().getHours();
   const greeting =
     hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  const beginSwipe = (id: string) => {
+    swipeBlockedUntil.current[id] = Number.POSITIVE_INFINITY;
+  };
+  const finishSwipe = (id: string) => {
+    swipeBlockedUntil.current[id] = Date.now() + 250;
+  };
+  const swipeIsBlocked = (id: string) =>
+    (swipeBlockedUntil.current[id] ?? 0) > Date.now();
   const upcomingDays = Array.from({ length: 5 }, (_, offset) => {
     const key = dateKeyFromOffset(offset);
     const date = dateFromKey(key);
@@ -1544,23 +1562,6 @@ function InstructorHome({
           );
         })}
       </View>
-      <Pressable
-        onPress={plan.status === "saved" ? assign : create}
-        style={s.todayPlan}
-      >
-        <View style={s.flex}>
-          <Text style={s.whyLabel}>CURRENT SAVED PLAN</Text>
-          <Text style={s.moveTitle}>{plan.brief.program}</Text>
-          <Text style={s.sub}>
-            {plan.brief.week} · {plan.brief.day} · {fmt(planTotal(plan))}
-          </Text>
-        </View>
-        <Pill
-          label={plan.status === "saved" ? "ASSIGN" : "SAVE"}
-          active
-          green={plan.status === "saved"}
-        />
-      </Pressable>
       <View style={s.row}>
         <Text style={s.section}>{classDateLabel(selectedDate)} Classes</Text>
         <Pressable onPress={create} style={s.plan}>
@@ -1577,13 +1578,20 @@ function InstructorHome({
             <Swipeable
               key={slot.id}
               overshootRight={false}
-              rightThreshold={38}
+              rightThreshold={64}
+              dragOffsetFromRightEdge={18}
+              onSwipeableOpenStartDrag={() => beginSwipe(slot.id)}
+              onSwipeableCloseStartDrag={() => beginSwipe(slot.id)}
+              onSwipeableOpen={() => finishSwipe(slot.id)}
+              onSwipeableClose={() => finishSwipe(slot.id)}
               renderRightActions={() => (
                 <View style={s.swipeActions}>
                   <Pressable
                     accessibilityRole="button"
                     accessibilityLabel={`Edit ${slot.level} class`}
-                    onPress={() => modify(slot)}
+                    onPress={() => {
+                      if (!swipeIsBlocked(slot.id)) modify(slot);
+                    }}
                     style={s.swipeEdit}
                   >
                     <Pencil size={18} color={C.white} />
@@ -1592,7 +1600,9 @@ function InstructorHome({
                   <Pressable
                     accessibilityRole="button"
                     accessibilityLabel={`Delete ${slot.level} class`}
-                    onPress={() => remove(slot)}
+                    onPress={() => {
+                      if (!swipeIsBlocked(slot.id)) remove(slot);
+                    }}
                     style={s.swipeDelete}
                   >
                     <Trash2 size={18} color={C.white} />
@@ -1602,7 +1612,11 @@ function InstructorHome({
               )}
             >
               <Pressable
-                onPress={ready ? () => start(slot) : assign}
+                onPress={() => {
+                  if (swipeIsBlocked(slot.id)) return;
+                  if (ready) start(slot);
+                  else assign();
+                }}
                 style={s.classCard}
               >
                 <View style={[s.rail, ready ? s.readyRail : s.planRail]} />
@@ -1621,7 +1635,12 @@ function InstructorHome({
                   {ready ? (
                     <>
                       <Pill label="READY" active green />
-                      <Pressable onPress={() => start(slot)} style={s.start}>
+                      <Pressable
+                        onPress={() => {
+                          if (!swipeIsBlocked(slot.id)) start(slot);
+                        }}
+                        style={s.start}
+                      >
                         <Play size={14} color={C.white} fill={C.white} />
                         <Text style={s.startText}>Start</Text>
                       </Pressable>
@@ -1636,7 +1655,12 @@ function InstructorHome({
                       >
                         {hasDraft ? "DRAFT AVAILABLE" : "PLAN NEEDED"}
                       </Text>
-                      <Pressable onPress={assign} style={s.assignCompact}>
+                      <Pressable
+                        onPress={() => {
+                          if (!swipeIsBlocked(slot.id)) assign();
+                        }}
+                        style={s.assignCompact}
+                      >
                         <CalendarDays size={13} color={C.white} />
                         <Text style={s.assignCompactText}>Assign</Text>
                       </Pressable>
@@ -2439,6 +2463,10 @@ function Plans({
   duplicate: () => void;
   select: (plan: ClassPlan) => void;
 }) {
+  const reusablePlans =
+    plan.status === "saved"
+      ? [plan, ...savedPlans.filter((saved) => saved.id !== plan.id)]
+      : savedPlans;
   return (
     <ScrollView contentContainerStyle={s.page}>
       <View style={s.row}>
@@ -2450,46 +2478,46 @@ function Plans({
           <Plus size={22} color={C.rose} />
         </Pressable>
       </View>
-      <Text style={s.group}>CURRENT PLAN</Text>
-      <Pressable onPress={open} style={s.currentPlan}>
-        <View style={s.row}>
-          <View style={s.flex}>
-            <Text style={s.moveTitle}>{plan.brief.program}</Text>
-            <Text style={s.sub}>
-              {plan.brief.week} · {plan.brief.day} · v{plan.version}
-            </Text>
-            {plan.brief.scheduledDate && plan.brief.scheduledTime ? (
+      {plan.status === "draft" ? (
+        <>
+          <Text style={s.group}>DRAFT IN PROGRESS</Text>
+          <Pressable onPress={open} style={s.currentPlan}>
+            <View style={s.row}>
+              <View style={s.flex}>
+                <Text style={s.moveTitle}>{plan.brief.program}</Text>
+                <Text style={s.sub}>
+                  {plan.brief.week} · {plan.brief.day} · v{plan.version}
+                </Text>
+                {plan.brief.scheduledDate && plan.brief.scheduledTime ? (
+                  <Text style={s.duration}>
+                    {classDateLabel(plan.brief.scheduledDate, true)} at{" "}
+                    {plan.brief.scheduledTime}
+                  </Text>
+                ) : null}
+              </View>
+              <Pill label="DRAFT" active />
+            </View>
+            <View style={s.planDivider} />
+            <View style={s.row}>
               <Text style={s.duration}>
-                {classDateLabel(plan.brief.scheduledDate, true)} at{" "}
-                {plan.brief.scheduledTime}
+                {plan.brief.energy} · {plan.brief.equipment.join(", ")}
               </Text>
-            ) : null}
+              <Text style={s.planTime}>{fmt(planTotal(plan))}</Text>
+            </View>
+          </Pressable>
+          <View style={s.planActions}>
+            <View style={s.flex}>
+              <Outline label="Continue Plan" onPress={open} />
+            </View>
+            <Pressable onPress={duplicate} style={s.iconAction}>
+              <RefreshCw size={18} color={C.rose} />
+            </Pressable>
           </View>
-          <Pill
-            label={plan.status === "saved" ? "SAVED" : "DRAFT"}
-            active
-            green={plan.status === "saved"}
-          />
-        </View>
-        <View style={s.planDivider} />
-        <View style={s.row}>
-          <Text style={s.duration}>
-            {plan.brief.energy} · {plan.brief.equipment.join(", ")}
-          </Text>
-          <Text style={s.planTime}>{fmt(planTotal(plan))}</Text>
-        </View>
-      </Pressable>
-      <View style={s.planActions}>
-        <View style={s.flex}>
-          <Outline label="Open Plan" onPress={open} />
-        </View>
-        <Pressable onPress={duplicate} style={s.iconAction}>
-          <RefreshCw size={18} color={C.rose} />
-        </Pressable>
-      </View>
+        </>
+      ) : null}
       <Text style={s.group}>SAVED PLANS</Text>
-      {savedPlans.length ? (
-        savedPlans.map((saved) => (
+      {reusablePlans.length ? (
+        reusablePlans.map((saved) => (
           <Pressable
             key={saved.id}
             onPress={() => select(saved)}
@@ -2594,7 +2622,15 @@ function Details({
             </Pressable>
           }
         />
-        <Art />
+        <View style={s.detailArtwork}>
+          <Image
+            source={movementArtworkSource(movement)}
+            style={s.detailArtworkImage}
+            resizeMode={movementArtworkMode(movement)}
+            accessibilityLabel={`${movement.name} movement demonstration`}
+          />
+          <Text style={s.detailArtworkPosition}>{movement.position}</Text>
+        </View>
         <Text style={s.movementTitle}>{movement.name}</Text>
         <View style={s.options}>
           <Pill label={movement.level} active />
@@ -2956,7 +2992,14 @@ function Library({
           onPress={() => open(movement)}
           style={s.libraryRow}
         >
-          <View style={s.thumb} />
+          <View style={s.thumb}>
+            <Image
+              source={movementArtworkSource(movement)}
+              style={s.thumbImage}
+              resizeMode={movementArtworkMode(movement)}
+              accessibilityLabel={`${movement.name} movement preview`}
+            />
+          </View>
           <View style={s.flex}>
             <Text style={s.moveTitle}>{movement.name}</Text>
             <Text style={s.sub}>
@@ -4805,6 +4848,9 @@ function TeachingSession({
 
 function BlushBodiesApp() {
   const [screen, setScreen] = useState<Screen>("welcome");
+  const [signupReturnScreen, setSignupReturnScreen] = useState<
+    "welcome" | "signin"
+  >("welcome");
   const [tab, setTab] = useState<Tab>("home");
   const [clientTab, setClientTab] = useState<ClientTab>("clientHome");
   const [role, setRole] = useState<Role>("instructor");
@@ -5429,7 +5475,12 @@ function BlushBodiesApp() {
   if (screen === "welcome")
     return (
       <Welcome
-        choose={() => {
+        getStarted={() => {
+          setRole("instructor");
+          setSignupReturnScreen("welcome");
+          setScreen("signup");
+        }}
+        logIn={() => {
           setRole("instructor");
           setScreen("signin");
         }}
@@ -5440,7 +5491,10 @@ function BlushBodiesApp() {
       <SignIn
         role="instructor"
         back={() => setScreen("welcome")}
-        signup={() => setScreen("signup")}
+        signup={() => {
+          setSignupReturnScreen("signin");
+          setScreen("signup");
+        }}
         resetPassword={(email) => {
           setResetEmail(email);
           setScreen("resetPassword");
@@ -5465,7 +5519,7 @@ function BlushBodiesApp() {
     return (
       <SignUp
         role="instructor"
-        back={() => setScreen("signin")}
+        back={() => setScreen(signupReturnScreen)}
         complete={register}
       />
     );
@@ -5592,13 +5646,7 @@ function BlushBodiesApp() {
           <InstructorHome
             schedule={schedule}
             account={account}
-            plan={plan}
             create={() => setScreen("create")}
-            teach={() =>
-              plan.status === "saved"
-                ? setScreen("teach")
-                : setScreen("generated")
-            }
             assign={() =>
               plan.status === "saved"
                 ? setScreen("assign")
@@ -6267,6 +6315,26 @@ const s = StyleSheet.create({
   moveNumText: { fontSize: 11, color: C.rose, fontWeight: "800" },
   moveTitle: { color: C.ink, fontSize: 14, fontWeight: "800" },
   moveTime: { color: C.ink, fontSize: 12, fontWeight: "800" },
+  detailArtwork: {
+    width: "100%",
+    aspectRatio: 1.6,
+    borderRadius: 18,
+    backgroundColor: "#F4E3E3",
+    overflow: "hidden",
+  },
+  detailArtworkImage: { width: "100%", height: "100%" },
+  detailArtworkPosition: {
+    position: "absolute",
+    left: 12,
+    bottom: 12,
+    color: C.ink,
+    fontSize: 10,
+    fontWeight: "800",
+    backgroundColor: "rgba(255,255,255,0.9)",
+    borderRadius: 10,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+  },
   movementTitle: { color: C.ink, fontSize: 28, fontWeight: "800" },
   detailTime: { color: C.ink, fontSize: 14, fontWeight: "800" },
   cue: { flexDirection: "row", alignItems: "center", gap: 12, minHeight: 34 },
@@ -6562,7 +6630,9 @@ const s = StyleSheet.create({
     height: 50,
     borderRadius: 10,
     backgroundColor: "#E9D3D5",
+    overflow: "hidden",
   },
+  thumbImage: { width: "100%", height: "100%" },
   stats: { flexDirection: "row", flexWrap: "wrap", gap: 14 },
   stat: {
     width: "47%",
