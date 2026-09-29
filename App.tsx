@@ -40,6 +40,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Animated,
+  AppState,
   Easing,
   Image,
   Modal,
@@ -192,16 +193,75 @@ const userStorageKey = (account: Pick<Account, "role" | "email">) =>
   `${USER_STORAGE_PREFIX}${account.role}/${account.email.toLowerCase()}`;
 const CREDENTIALS_KEY = "blush-bodies-local-credentials-v1";
 const STUDIO_SCHEDULE_KEY = "@blush-bodies/studio-schedule-v1";
+const PASSWORD_MIN_LENGTH = 12;
+const PASSWORD_MAX_LENGTH = 128;
+const ALLOW_SANDBOX_PASSWORD_RESET = __DEV__;
+const SECURE_STORE_OPTIONS: SecureStore.SecureStoreOptions = {
+  keychainService: "blush-bodies.credentials",
+  keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+};
+const INVALID_CREDENTIAL_SALT = "blush-bodies-invalid-credential";
+const SIGN_IN_FAILURE_LIMIT = 5;
+const SIGN_IN_LOCK_MS = 30_000;
+const SESSION_BACKGROUND_LOCK_MS = 5 * 60_000;
+const signInAttempts = new Map<
+  string,
+  { failures: number; blockedUntil: number; lastFailure: number }
+>();
+const passwordValidationError = (password: string) => {
+  if (password.length < PASSWORD_MIN_LENGTH)
+    return `Use at least ${PASSWORD_MIN_LENGTH} characters.`;
+  if (password.length > PASSWORD_MAX_LENGTH)
+    return `Use no more than ${PASSWORD_MAX_LENGTH} characters.`;
+  if (!/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password))
+    return "Include uppercase, lowercase and a number.";
+  return null;
+};
+const signInAttemptKey = (role: Role, email: string) =>
+  `${role}:${email.toLowerCase()}`;
+const signInBlockedMessage = (blockedUntil: number) =>
+  `Too many sign-in attempts. Try again in ${Math.max(1, Math.ceil((blockedUntil - Date.now()) / 1000))} seconds.`;
+const recordSignInFailure = (key: string) => {
+  const now = Date.now();
+  const previous = signInAttempts.get(key);
+  const failures =
+    previous && now - previous.lastFailure < 15 * 60_000
+      ? previous.failures + 1
+      : 1;
+  const penaltyLevel = Math.max(0, failures - SIGN_IN_FAILURE_LIMIT);
+  const blockedUntil =
+    failures >= SIGN_IN_FAILURE_LIMIT
+      ? now + Math.min(5 * 60_000, SIGN_IN_LOCK_MS * 2 ** penaltyLevel)
+      : 0;
+  signInAttempts.set(key, { failures, blockedUntil, lastFailure: now });
+  return blockedUntil;
+};
 const hashPassword = (password: string, salt: string) =>
   Crypto.digestStringAsync(
     Crypto.CryptoDigestAlgorithm.SHA256,
     `${salt}:${password}`,
   );
 const readCredentials = async (): Promise<LocalCredential[]> => {
-  const raw =
-    Platform.OS === "web"
-      ? await AsyncStorage.getItem(CREDENTIALS_KEY)
-      : await SecureStore.getItemAsync(CREDENTIALS_KEY);
+  if (Platform.OS === "web") {
+    const raw = await AsyncStorage.getItem(CREDENTIALS_KEY);
+    return raw ? (JSON.parse(raw) as LocalCredential[]) : [];
+  }
+  let raw = await SecureStore.getItemAsync(
+    CREDENTIALS_KEY,
+    SECURE_STORE_OPTIONS,
+  );
+  if (!raw) {
+    const legacyValue = await SecureStore.getItemAsync(CREDENTIALS_KEY);
+    if (legacyValue) {
+      await SecureStore.setItemAsync(
+        CREDENTIALS_KEY,
+        legacyValue,
+        SECURE_STORE_OPTIONS,
+      );
+      await SecureStore.deleteItemAsync(CREDENTIALS_KEY);
+      raw = legacyValue;
+    }
+  }
   return raw ? (JSON.parse(raw) as LocalCredential[]) : [];
 };
 const writeCredentials = async (
@@ -212,14 +272,21 @@ const writeCredentials = async (
     await AsyncStorage.setItem(CREDENTIALS_KEY, value);
     return;
   }
-  await SecureStore.setItemAsync(CREDENTIALS_KEY, value);
+  await SecureStore.setItemAsync(
+    CREDENTIALS_KEY,
+    value,
+    SECURE_STORE_OPTIONS,
+  );
 };
 const deleteCredentials = async (): Promise<void> => {
   if (Platform.OS === "web") {
     await AsyncStorage.removeItem(CREDENTIALS_KEY);
     return;
   }
-  await SecureStore.deleteItemAsync(CREDENTIALS_KEY);
+  await Promise.all([
+    SecureStore.deleteItemAsync(CREDENTIALS_KEY, SECURE_STORE_OPTIONS),
+    SecureStore.deleteItemAsync(CREDENTIALS_KEY),
+  ]);
 };
 const BOOKING_REMINDER_CHANNEL = "booking-reminders";
 const IS_EXPO_GO = Constants.expoGoConfig !== null;
@@ -299,6 +366,31 @@ const classDateLabel = (key: string, long = false) => {
     day: "numeric",
     month: long ? "long" : "short",
   });
+};
+const PROGRAM_DAY_OPTIONS = Array.from({ length: 4 }, (_, weekIndex) =>
+  Array.from(
+    { length: 5 },
+    (_, dayIndex) => `Week ${weekIndex + 1} · Day ${dayIndex + 1}`,
+  ),
+).flat();
+const normalizeProgramDay = (value: string) => {
+  const week = value.match(/Week\s+\d+/i)?.[0];
+  const day = value.match(/Day\s+\d+/i)?.[0];
+  if (!week || !day) return PROGRAM_DAY_OPTIONS[0];
+  const normalized = `${week.replace(/^week/i, "Week")} · ${day.replace(/^day/i, "Day")}`;
+  return PROGRAM_DAY_OPTIONS.includes(normalized)
+    ? normalized
+    : PROGRAM_DAY_OPTIONS[0];
+};
+const timeFromMinutes = (minutes: number) =>
+  `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+const scheduleTimeOptions = (date: string, now: Date) => {
+  const today = date === localDateKey(now);
+  const nextQuarterHour =
+    Math.floor((now.getHours() * 60 + now.getMinutes()) / 15) * 15 + 15;
+  return Array.from({ length: 24 * 4 }, (_, index) => index * 15)
+    .filter((minutes) => !today || minutes >= nextQuarterHour)
+    .map(timeFromMinutes);
 };
 const clientClassStart = (item: ClientClass) => {
   const [year, month, day] = item.date.split("-").map(Number);
@@ -641,6 +733,17 @@ const phaseTotal = (plan: ClassPlan, phase: Phase) =>
   plan.movements
     .filter((movement) => movement.phase === phase)
     .reduce((total, movement) => total + movement.duration, 0);
+const planTimingIsValid = (plan: ClassPlan) =>
+  phaseTotal(plan, "Warm-up") === 300 &&
+  phaseTotal(plan, "Main") === 2100 &&
+  phaseTotal(plan, "Cool-down") === 300;
+const planLevel = (plan: ClassPlan) => {
+  const program = plan.brief.program.toLowerCase();
+  if (program.includes("advanced") || program.includes("strong"))
+    return "Advanced";
+  if (program.includes("intermediate")) return "Intermediate";
+  return "Beginner";
+};
 const positionGroup = (position: string) => {
   const normalized = position.toLowerCase();
   if (normalized.includes("standing")) return "Standing";
@@ -1014,12 +1117,14 @@ function SignIn({
   complete,
   signup,
   resetPassword,
+  allowSandboxReset,
   role,
 }: {
   back: () => void;
   complete: (email: string, password: string) => Promise<string | null>;
   signup: () => void;
   resetPassword: (email: string) => void;
+  allowSandboxReset: boolean;
   role: Role;
 }) {
   const [email, setEmail] = useState("");
@@ -1077,7 +1182,10 @@ function SignIn({
             }}
             autoCapitalize="none"
             autoCorrect={false}
+            autoComplete="email"
+            textContentType="emailAddress"
             keyboardType="email-address"
+            maxLength={254}
             placeholder={
               isInstructor ? "coach@blushbodies.com" : "you@email.com"
             }
@@ -1092,6 +1200,9 @@ function SignIn({
               setError("");
             }}
             secureTextEntry
+            autoComplete="current-password"
+            textContentType="password"
+            maxLength={PASSWORD_MAX_LENGTH}
             placeholder="Enter password"
             placeholderTextColor={C.muted}
             style={s.formInput}
@@ -1104,17 +1215,21 @@ function SignIn({
           <Pressable accessibilityRole="button" onPress={signup}>
             <Text style={s.forgot}>Create a new account</Text>
           </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => resetPassword(email.trim().toLowerCase())}
-          >
-            <Text style={s.forgot}>Forgot password?</Text>
-          </Pressable>
+          {allowSandboxReset ? (
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => resetPassword(email.trim().toLowerCase())}
+            >
+              <Text style={s.forgot}>Reset local test password</Text>
+            </Pressable>
+          ) : null}
         </View>
         <View style={s.demoNote}>
           <Text style={s.whyLabel}>DEMO SESSION</Text>
           <Text style={s.whyCopy}>
-            Local prototype accounts are verified securely on this device.
+            {Platform.OS === "web"
+              ? "Browser preview accounts are local demo data and are not production authentication."
+              : "Native prototype credentials are protected by this device's secure storage."}
           </Text>
         </View>
       </ScrollView>
@@ -1144,15 +1259,9 @@ function SandboxPasswordReset({
       setError("Enter the email used for this local account.");
       return;
     }
-    if (
-      password.length < 8 ||
-      !/[a-z]/.test(password) ||
-      !/[A-Z]/.test(password) ||
-      !/\d/.test(password)
-    ) {
-      setError(
-        "Use at least 8 characters with uppercase, lowercase and a number.",
-      );
+    const passwordError = passwordValidationError(password);
+    if (passwordError) {
+      setError(passwordError);
       return;
     }
     if (password !== confirmation) {
@@ -1217,7 +1326,10 @@ function SandboxPasswordReset({
             }}
             autoCapitalize="none"
             autoCorrect={false}
+            autoComplete="email"
+            textContentType="emailAddress"
             keyboardType="email-address"
+            maxLength={254}
             placeholder="you@email.com"
             placeholderTextColor={C.muted}
             style={s.formInput}
@@ -1231,6 +1343,9 @@ function SandboxPasswordReset({
             }}
             secureTextEntry
             autoCapitalize="none"
+            autoComplete="new-password"
+            textContentType="newPassword"
+            maxLength={PASSWORD_MAX_LENGTH}
             placeholder="Create a new password"
             placeholderTextColor={C.muted}
             style={s.formInput}
@@ -1244,6 +1359,9 @@ function SandboxPasswordReset({
             }}
             secureTextEntry
             autoCapitalize="none"
+            autoComplete="new-password"
+            textContentType="newPassword"
+            maxLength={PASSWORD_MAX_LENGTH}
             placeholder="Repeat the new password"
             placeholderTextColor={C.muted}
             style={s.formInput}
@@ -1277,6 +1395,7 @@ function SignUp({
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const submit = async () => {
@@ -1290,15 +1409,13 @@ function SignUp({
       setError("Enter a valid email address.");
       return;
     }
-    if (
-      password.length < 8 ||
-      !/[a-z]/.test(password) ||
-      !/[A-Z]/.test(password) ||
-      !/\d/.test(password)
-    ) {
-      setError(
-        "Use at least 8 characters with uppercase, lowercase and a number.",
-      );
+    const passwordError = passwordValidationError(password);
+    if (passwordError) {
+      setError(passwordError);
+      return;
+    }
+    if (password !== confirmation) {
+      setError("The passwords do not match.");
       return;
     }
     setSubmitting(true);
@@ -1345,6 +1462,9 @@ function SignUp({
               setError("");
             }}
             autoCapitalize="words"
+            autoComplete="name"
+            textContentType="name"
+            maxLength={100}
             placeholder="Your full name"
             placeholderTextColor={C.muted}
             style={s.formInput}
@@ -1358,7 +1478,10 @@ function SignUp({
             }}
             autoCapitalize="none"
             autoCorrect={false}
+            autoComplete="email"
+            textContentType="emailAddress"
             keyboardType="email-address"
+            maxLength={254}
             placeholder="you@email.com"
             placeholderTextColor={C.muted}
             style={s.formInput}
@@ -1371,10 +1494,33 @@ function SignUp({
               setError("");
             }}
             secureTextEntry
+            autoComplete="new-password"
+            textContentType="newPassword"
+            maxLength={PASSWORD_MAX_LENGTH}
             placeholder="Create password"
             placeholderTextColor={C.muted}
             style={s.formInput}
           />
+          <Text style={s.label}>CONFIRM PASSWORD</Text>
+          <TextInput
+            value={confirmation}
+            onChangeText={(value) => {
+              setConfirmation(value);
+              setError("");
+            }}
+            secureTextEntry
+            autoCapitalize="none"
+            autoComplete="new-password"
+            textContentType="newPassword"
+            maxLength={PASSWORD_MAX_LENGTH}
+            placeholder="Repeat password"
+            placeholderTextColor={C.muted}
+            style={s.formInput}
+          />
+          <Text style={s.sub}>
+            At least {PASSWORD_MIN_LENGTH} characters with uppercase, lowercase
+            and a number.
+          </Text>
           {error ? <Text style={s.formError}>{error}</Text> : null}
           <Main
             label={submitting ? "Creating Account..." : "Create Account"}
@@ -1384,7 +1530,9 @@ function SignUp({
         <View style={s.demoNote}>
           <Text style={s.whyLabel}>PROTOTYPE ACCOUNT</Text>
           <Text style={s.whyCopy}>
-            Your profile and encrypted local credentials stay on this device.
+            {Platform.OS === "web"
+              ? "Browser preview accounts stay in this browser and are for demonstration only."
+              : "Your profile stays on this device and credentials are protected by secure storage."}
           </Text>
         </View>
       </ScrollView>
@@ -1498,11 +1646,11 @@ function InstructorHome({
   schedule: ScheduledClass[];
   account: Account;
   create: () => void;
-  assign: () => void;
+  assign: (slot: ScheduledClass) => void;
   start: (slot: ScheduledClass) => void;
   modify: (slot: ScheduledClass) => void;
   remove: (slot: ScheduledClass) => void;
-  getPlanTitle: (planId?: string) => string | undefined;
+  getPlanTitle: (slot: ScheduledClass) => string | undefined;
 }) {
   const firstName = account.name.split(" ")[0];
   const [selectedDate, setSelectedDate] = useState(localDateKey());
@@ -1571,9 +1719,9 @@ function InstructorHome({
       </View>
       <View style={s.stack}>
         {visibleSchedule.map((slot) => {
-          const ready = Boolean(slot.planId);
+          const planTitle = getPlanTitle(slot);
+          const ready = Boolean(slot.planId && planTitle);
           const hasDraft = !ready && slot.status === "DRAFT";
-          const planTitle = getPlanTitle(slot.planId);
           return (
             <Swipeable
               key={slot.id}
@@ -1615,7 +1763,7 @@ function InstructorHome({
                 onPress={() => {
                   if (swipeIsBlocked(slot.id)) return;
                   if (ready) start(slot);
-                  else assign();
+                  else assign(slot);
                 }}
                 style={s.classCard}
               >
@@ -1657,7 +1805,7 @@ function InstructorHome({
                       </Text>
                       <Pressable
                         onPress={() => {
-                          if (!swipeIsBlocked(slot.id)) assign();
+                          if (!swipeIsBlocked(slot.id)) assign(slot);
                         }}
                         style={s.assignCompact}
                       >
@@ -1685,49 +1833,169 @@ function InstructorHome({
 }
 function AssignPlan({
   plan,
+  savedPlans,
   schedule,
+  targetSlotId,
   back,
+  create,
   assign,
 }: {
   plan: ClassPlan;
+  savedPlans: ClassPlan[];
   schedule: ScheduledClass[];
+  targetSlotId?: string;
   back: () => void;
-  assign: (id: string) => void;
+  create: () => void;
+  assign: (slotId: string, planId: string) => void;
 }) {
+  const target = schedule.find((slot) => slot.id === targetSlotId);
+  const reviewedPlans = [plan, ...savedPlans]
+    .filter(
+      (candidate) =>
+        candidate.status === "saved" &&
+        planTimingIsValid(candidate) &&
+        (!target || planLevel(candidate) === target.level),
+    )
+    .filter(
+      (candidate, index, candidates) =>
+        candidates.findIndex((item) => item.id === candidate.id) === index,
+    )
+    .sort((a, b) => b.version - a.version);
+  const currentAssignment = reviewedPlans.find(
+    (candidate) => candidate.id === target?.planId,
+  );
+  const futureSchedule = schedule.filter(
+    (slot) =>
+      slot.date >= localDateKey() && slot.level === planLevel(plan),
+  );
+  const confirmAssignment = (slot: ScheduledClass, selectedPlan: ClassPlan) => {
+    if (slot.planId === selectedPlan.id) return;
+    const assignedPlan = reviewedPlans.find(
+      (candidate) => candidate.id === slot.planId,
+    );
+    if (assignedPlan) {
+      confirmAction({
+        title: "Replace assigned plan?",
+        message: `${assignedPlan.brief.program} is currently assigned to ${classDateLabel(slot.date, true)} at ${slot.time}.`,
+        confirmText: "Replace Plan",
+        onConfirm: () => assign(slot.id, selectedPlan.id),
+      });
+      return;
+    }
+    assign(slot.id, selectedPlan.id);
+  };
   return (
     <ScrollView contentContainerStyle={s.page}>
-      <Header title="Use for Another Class" back={back} />
-      <Text style={s.sub}>
-        Assign {plan.brief.program} · {plan.brief.week} · {plan.brief.day} to a
-        scheduled class.
-      </Text>
-      <Text style={s.group}>SCHEDULED CLASS SLOTS</Text>
-      {schedule.map((slot) => {
-        const occupied = slot.planId === plan.id;
-        return (
-          <Pressable
-            key={slot.id}
-            onPress={() => assign(slot.id)}
-            style={s.assignCard}
-          >
-            <View style={s.time}>
-              <Text style={s.timeText}>{slot.time}</Text>
-              <Text style={s.duration}>45 min</Text>
-            </View>
+      <Header
+        title={target ? "Assign a Plan" : "Use for Another Class"}
+        back={back}
+      />
+      {target ? (
+        <>
+          <Text style={s.sub}>
+            Choose the reviewed plan this scheduled class should use.
+          </Text>
+          <View style={s.assignmentTarget}>
+            <CalendarDays size={21} color={C.rose} />
             <View style={s.flex}>
-              <Text style={s.moveTitle}>{slot.level}</Text>
-              <Text style={s.sub}>{slot.lesson}</Text>
-              <Text style={s.duration}>{classDateLabel(slot.date, true)}</Text>
+              <Text style={s.moveTitle}>
+                {target.level} / {target.lesson}
+              </Text>
+              <Text style={s.sub}>
+                {classDateLabel(target.date, true)} at {target.time}
+              </Text>
             </View>
             <Pill
-              label={occupied ? "ASSIGNED" : slot.status}
+              label={currentAssignment ? "READY" : "PLAN NEEDED"}
               active
-              green={occupied || slot.status === "READY"}
+              green={Boolean(currentAssignment)}
             />
-            <ChevronRight size={19} color={C.muted} />
-          </Pressable>
-        );
-      })}
+          </View>
+          <Text style={s.group}>REVIEWED PLANS</Text>
+          {reviewedPlans.map((candidate) => {
+            const selected = candidate.id === target.planId;
+            return (
+              <Pressable
+                key={candidate.id}
+                accessibilityRole="button"
+                accessibilityLabel={`Assign ${candidate.brief.program}`}
+                disabled={selected}
+                onPress={() => confirmAssignment(target, candidate)}
+                style={[s.savedPlan, selected && s.assignmentSelected]}
+              >
+                <View style={s.flex}>
+                  <Text style={s.moveTitle}>{candidate.brief.program}</Text>
+                  <Text style={s.sub}>
+                    {candidate.brief.week} / {candidate.brief.day} / v
+                    {candidate.version}
+                  </Text>
+                  <Text style={s.duration}>
+                    {fmt(planTotal(candidate))} / {candidate.movements.length} movements
+                  </Text>
+                </View>
+                {selected ? (
+                  <Pill label="ASSIGNED" active green />
+                ) : (
+                  <ChevronRight size={19} color={C.rose} />
+                )}
+              </Pressable>
+            );
+          })}
+          {!reviewedPlans.length ? (
+            <View style={s.emptyCard}>
+              <Text style={s.moveTitle}>No reviewed plans yet</Text>
+              <Text style={s.sub}>
+                Create, review and save a valid 45-minute plan before assigning
+                it.
+              </Text>
+              <Main label="Create Plan" onPress={create} />
+            </View>
+          ) : null}
+        </>
+      ) : (
+        <>
+          <Text style={s.sub}>
+            Assign {plan.brief.program} / {plan.brief.week} / {plan.brief.day} to
+            another scheduled class.
+          </Text>
+          <Text style={s.group}>UPCOMING CLASS SLOTS</Text>
+          {futureSchedule.map((slot) => {
+            const occupied = slot.planId === plan.id;
+            return (
+              <Pressable
+                key={slot.id}
+                accessibilityRole="button"
+                accessibilityLabel={`Assign plan to ${slot.level} class at ${slot.time}`}
+                disabled={occupied}
+                onPress={() => confirmAssignment(slot, plan)}
+                style={[s.assignCard, occupied && s.assignmentSelected]}
+              >
+                <View style={s.time}>
+                  <Text style={s.timeText}>{slot.time}</Text>
+                  <Text style={s.duration}>45 min</Text>
+                </View>
+                <View style={s.flex}>
+                  <Text style={s.moveTitle}>{slot.level}</Text>
+                  <Text style={s.sub}>{slot.lesson}</Text>
+                  <Text style={s.duration}>{classDateLabel(slot.date, true)}</Text>
+                </View>
+                <Pill
+                  label={occupied ? "ASSIGNED" : slot.planId ? "REPLACE" : "ASSIGN"}
+                  active
+                  green={occupied}
+                />
+                {!occupied ? <ChevronRight size={19} color={C.muted} /> : null}
+              </Pressable>
+            );
+          })}
+          {!futureSchedule.length ? (
+            <View style={s.emptyCard}>
+              <Text style={s.moveTitle}>No upcoming classes</Text>
+              <Text style={s.sub}>Add a class in My Schedule first.</Text>
+            </View>
+          ) : null}
+        </>
+      )}
     </ScrollView>
   );
 }
@@ -1745,17 +2013,19 @@ function ScheduleManager({
   remove: (id: string) => void;
 }) {
   const [date, setDate] = useState(dateKeyFromOffset(1));
-  const [time, setTime] = useState("");
+  const [time, setTime] = useState("09:00");
   const [level, setLevel] = useState("Beginner");
-  const [lesson, setLesson] = useState("Week 1 / Day 1");
+  const [lesson, setLesson] = useState(PROGRAM_DAY_OPTIONS[0]);
   const [error, setError] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [now, setNow] = useState(() => new Date());
+  const timeOptions = scheduleTimeOptions(date, now);
   const resetForm = () => {
     setEditingId(null);
     setDate(dateKeyFromOffset(1));
-    setTime("");
+    setTime("09:00");
     setLevel("Beginner");
-    setLesson("Week 1 / Day 1");
+    setLesson(PROGRAM_DAY_OPTIONS[0]);
     setError("");
   };
   const edit = (slot: ScheduledClass) => {
@@ -1763,15 +2033,27 @@ function ScheduleManager({
     setDate(slot.date);
     setTime(slot.time);
     setLevel(slot.level);
-    setLesson(slot.lesson);
+    setLesson(normalizeProgramDay(slot.lesson));
     setError("");
   };
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    if (timeOptions.includes(time)) return;
+    setTime(timeOptions[0] ?? "");
+  }, [date, now]);
   useEffect(() => {
     const initialClass = schedule.find((slot) => slot.id === initialEditId);
     if (initialClass) edit(initialClass);
   }, [initialEditId]);
   const submit = () => {
     const clean = time.trim();
+    if (!clean) {
+      setError("Choose a future date with an available start time.");
+      return;
+    }
     const match = /^([01]\d|2[0-3]):([0-5]\d)$/.test(clean);
     if (!match) {
       setError("Use a 24-hour time such as 09:30.");
@@ -1856,16 +2138,19 @@ function ScheduleManager({
             textDisabledColor: C.line,
           }}
         />
-        <Text style={s.label}>START TIME</Text>
-        <TextInput
-          value={time}
-          onChangeText={setTime}
-          keyboardType="numbers-and-punctuation"
-          placeholder="09:30"
-          placeholderTextColor={C.muted}
-          maxLength={5}
-          style={s.formInput}
+        <ChoiceSelect
+          label="START TIME"
+          value={time || "No future times today"}
+          options={timeOptions}
+          onChange={(value) => {
+            setTime(value);
+            setError("");
+          }}
         />
+        <Text style={s.sub}>
+          {classDateLabel(date, true)} at {time || "--:--"} / Device time{" "}
+          {timeFromMinutes(now.getHours() * 60 + now.getMinutes())}
+        </Text>
         <Text style={s.label}>LEVEL</Text>
         <View style={s.options}>
           {["Beginner", "Intermediate", "Advanced"].map((option) => (
@@ -1874,13 +2159,14 @@ function ScheduleManager({
             </Pressable>
           ))}
         </View>
-        <Text style={s.label}>PROGRAM DAY</Text>
-        <TextInput
+        <ChoiceSelect
+          label="PROGRAM DAY"
           value={lesson}
-          onChangeText={setLesson}
-          placeholder="Week 1 / Day 1"
-          placeholderTextColor={C.muted}
-          style={s.formInput}
+          options={PROGRAM_DAY_OPTIONS}
+          onChange={(value) => {
+            setLesson(value);
+            setError("");
+          }}
         />
         {error ? <Text style={s.formError}>{error}</Text> : null}
         <Main
@@ -1956,22 +2242,24 @@ function ChoiceSelect({
                 <X size={20} color={C.muted} />
               </Pressable>
             </View>
-            {options.map((option) => {
-              const selected = option === value;
-              return (
-                <Pressable
-                  key={option}
-                  onPress={() => {
-                    onChange(option);
-                    setOpen(false);
-                  }}
-                  style={[s.choiceRow, selected && s.choiceRowSelected]}
-                >
-                  <Text style={s.settingText}>{option}</Text>
-                  {selected ? <Check size={19} color={C.rose} /> : null}
-                </Pressable>
-              );
-            })}
+            <ScrollView style={s.choiceList} showsVerticalScrollIndicator>
+              {options.map((option) => {
+                const selected = option === value;
+                return (
+                  <Pressable
+                    key={option}
+                    onPress={() => {
+                      onChange(option);
+                      setOpen(false);
+                    }}
+                    style={[s.choiceRow, selected && s.choiceRowSelected]}
+                  >
+                    <Text style={s.settingText}>{option}</Text>
+                    {selected ? <Check size={19} color={C.rose} /> : null}
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
           </Pressable>
         </Pressable>
       </Modal>
@@ -1981,9 +2269,11 @@ function ChoiceSelect({
 function Create({
   back,
   generate,
+  initialClass,
 }: {
   back: () => void;
   generate: (brief: PlanBrief) => void;
+  initialClass?: ScheduledClass;
 }) {
   const programs = [
     "Beginner Foundations",
@@ -1992,11 +2282,29 @@ function Create({
   ];
   const weeks = ["Week 1", "Week 2", "Week 3", "Week 4"];
   const days = ["Day 1", "Day 2", "Day 3", "Day 4", "Day 5"];
-  const [program, setProgram] = useState(programs[0]);
-  const [week, setWeek] = useState(weeks[0]);
-  const [day, setDay] = useState(days[0]);
-  const [scheduledDate, setScheduledDate] = useState(dateKeyFromOffset(1));
-  const [scheduledTime, setScheduledTime] = useState("09:00");
+  const initialWeek = initialClass?.lesson.match(/Week\s+\d+/i)?.[0];
+  const initialDay = initialClass?.lesson.match(/Day\s+\d+/i)?.[0];
+  const [program, setProgram] = useState(
+    initialClass?.level === "Intermediate"
+      ? programs[1]
+      : initialClass?.level === "Advanced"
+        ? programs[2]
+        : programs[0],
+  );
+  const [week, setWeek] = useState(
+    weeks.find((option) => option.toLowerCase() === initialWeek?.toLowerCase()) ??
+      weeks[0],
+  );
+  const [day, setDay] = useState(
+    days.find((option) => option.toLowerCase() === initialDay?.toLowerCase()) ??
+      days[0],
+  );
+  const [scheduledDate, setScheduledDate] = useState(
+    initialClass?.date ?? dateKeyFromOffset(1),
+  );
+  const [scheduledTime, setScheduledTime] = useState(
+    initialClass?.time ?? "09:00",
+  );
   const [energy, setEnergy] = useState("Flowing");
   const [equipment, setEquipment] = useState<string[]>(["Mat"]);
   const toggleEquipment = (item: string) =>
@@ -2186,10 +2494,7 @@ function Generated({
   save: () => void;
   teach: () => void;
 }) {
-  const valid =
-    phaseTotal(plan, "Warm-up") === 300 &&
-    phaseTotal(plan, "Main") === 2100 &&
-    phaseTotal(plan, "Cool-down") === 300;
+  const valid = planTimingIsValid(plan);
   const start = () => {
     if (!valid) {
       Alert.alert(
@@ -2318,10 +2623,7 @@ function Classes({
   const visible = plan.movements
     .map((movement, index) => ({ movement, index }))
     .filter((item) => filter === "All" || item.movement.phase === filter);
-  const valid =
-    phaseTotal(plan, "Warm-up") === 300 &&
-    phaseTotal(plan, "Main") === 2100 &&
-    phaseTotal(plan, "Cool-down") === 300;
+  const valid = planTimingIsValid(plan);
   const move = (index: number, direction: -1 | 1) => {
     const target = index + direction;
     if (
@@ -3493,15 +3795,9 @@ function ChangePassword({
       setError("Complete all password fields.");
       return;
     }
-    if (
-      newPassword.length < 8 ||
-      !/[a-z]/.test(newPassword) ||
-      !/[A-Z]/.test(newPassword) ||
-      !/\d/.test(newPassword)
-    ) {
-      setError(
-        "Use at least 8 characters with uppercase, lowercase and a number.",
-      );
+    const passwordError = passwordValidationError(newPassword);
+    if (passwordError) {
+      setError(passwordError);
       return;
     }
     if (newPassword !== confirmation) {
@@ -3558,6 +3854,9 @@ function ChangePassword({
             }}
             secureTextEntry
             autoCapitalize="none"
+            autoComplete="current-password"
+            textContentType="password"
+            maxLength={PASSWORD_MAX_LENGTH}
             style={s.formInput}
           />
           <Text style={s.label}>NEW PASSWORD</Text>
@@ -3569,6 +3868,9 @@ function ChangePassword({
             }}
             secureTextEntry
             autoCapitalize="none"
+            autoComplete="new-password"
+            textContentType="newPassword"
+            maxLength={PASSWORD_MAX_LENGTH}
             style={s.formInput}
           />
           <Text style={s.label}>CONFIRM NEW PASSWORD</Text>
@@ -3580,10 +3882,14 @@ function ChangePassword({
             }}
             secureTextEntry
             autoCapitalize="none"
+            autoComplete="new-password"
+            textContentType="newPassword"
+            maxLength={PASSWORD_MAX_LENGTH}
             style={s.formInput}
           />
           <Text style={s.sub}>
-            At least 8 characters with uppercase, lowercase and a number.
+            At least {PASSWORD_MIN_LENGTH} characters with uppercase, lowercase
+            and a number.
           </Text>
           {error ? <Text style={s.formError}>{error}</Text> : null}
         </View>
@@ -4877,6 +5183,9 @@ function BlushBodiesApp() {
   const [sessionHistory, setSessionHistory] = useState<SessionResult[]>([]);
   const [schedule, setSchedule] = useState<ScheduledClass[]>(initialSchedule);
   const [scheduleEditId, setScheduleEditId] = useState<string | undefined>();
+  const [assignmentSlotId, setAssignmentSlotId] = useState<
+    string | undefined
+  >();
   const [studioClasses, setStudioClasses] =
     useState<ClientClass[]>(clientClasses);
   const [libraryMovements, setLibraryMovements] =
@@ -4904,6 +5213,7 @@ function BlushBodiesApp() {
   const [hydrated, setHydrated] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
   const [resetEmail, setResetEmail] = useState("");
+  const backgroundedAt = useRef<number | null>(null);
   useEffect(() => {
     void Promise.all([
       AsyncStorage.removeItem(LEGACY_STORAGE_KEY),
@@ -4947,6 +5257,25 @@ function BlushBodiesApp() {
     instructorPreferences,
     clientPreferences,
   ]);
+  useEffect(() => {
+    if (Platform.OS === "web") return;
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        if (
+          signedIn &&
+          backgroundedAt.current !== null &&
+          Date.now() - backgroundedAt.current >= SESSION_BACKGROUND_LOCK_MS
+        ) {
+          setSignedIn(false);
+          setScreen("signin");
+        }
+        backgroundedAt.current = null;
+        return;
+      }
+      backgroundedAt.current ??= Date.now();
+    });
+    return () => subscription.remove();
+  }, [signedIn]);
   useEffect(() => {
     if (!hydrated || !signedIn || account.role !== "instructor") return;
     const plans = [plan, ...savedPlans];
@@ -5091,9 +5420,7 @@ function BlushBodiesApp() {
             `slot-${scheduledDate}-${scheduledTime.replace(":", "")}`,
           date: scheduledDate,
           time: scheduledTime,
-          level: saved.brief.program.includes("Intermediate")
-            ? "Intermediate"
-            : "Beginner",
+          level: planLevel(saved),
           lesson: `${saved.brief.week} / ${saved.brief.day}`,
           status: "READY",
           planId: saved.id,
@@ -5105,6 +5432,7 @@ function BlushBodiesApp() {
           `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`),
         );
       });
+      setAssignmentSlotId(undefined);
     }
   };
   const renamePlan = (name: string) => {
@@ -5145,26 +5473,39 @@ function BlushBodiesApp() {
     }));
     setScreen("classes");
   };
-  const assignPlan = (slotId: string) => {
-    if (plan.status !== "saved") {
-      setScreen("generated");
-      return;
-    }
+  const assignPlan = (slotId: string, planId: string) => {
+    const selectedPlan =
+      savedPlans.find((saved) => saved.id === planId) ??
+      (plan.id === planId && plan.status === "saved" ? plan : undefined);
+    if (!selectedPlan || !planTimingIsValid(selectedPlan)) return;
     setSchedule((current) =>
       current.map((slot) =>
         slot.id === slotId
-          ? { ...slot, status: "READY", planId: plan.id }
+          ? { ...slot, status: "READY", planId: selectedPlan.id }
           : slot,
       ),
     );
+    setPlan(selectedPlan);
+    setAssignmentSlotId(undefined);
     setScreen("home");
   };
   const findPlan = (planId?: string) =>
-    planId === plan.id ? plan : savedPlans.find((saved) => saved.id === planId);
+    savedPlans.find((saved) => saved.id === planId) ??
+    (planId === plan.id && plan.status === "saved" ? plan : undefined);
   const startScheduledClass = (slot: ScheduledClass) => {
     const assignedPlan = findPlan(slot.planId);
-    if (!assignedPlan) {
+    if (!assignedPlan || planLevel(assignedPlan) !== slot.level) {
+      setAssignmentSlotId(slot.id);
       setScreen("assign");
+      return;
+    }
+    if (!planTimingIsValid(assignedPlan)) {
+      setPlan(assignedPlan);
+      Alert.alert(
+        "Plan needs review",
+        "This class plan does not match the required 5 / 35 / 5 timing. Review it before teaching.",
+      );
+      setScreen("generated");
       return;
     }
     setPlan(assignedPlan);
@@ -5177,22 +5518,37 @@ function BlushBodiesApp() {
         : [...current, id],
     );
   const addMovementToPlan = () => {
-    setPlan((current) => ({
-      ...current,
-      status: "draft",
-      version: current.version + 1,
-      movements: [
-        ...current.movements,
-        {
-          id: `${selectedMovement.id}-${Date.now()}`,
-          title: selectedMovement.name,
-          position: selectedMovement.position,
-          duration: selectedMovement.duration,
-          phase: "Main",
-          cue: selectedMovement.cues[0],
-        },
-      ],
-    }));
+    setPlan((current) => {
+      const nextVersion = current.version + 1;
+      return {
+        ...current,
+        id:
+          current.status === "saved"
+            ? `${current.id}-v${nextVersion}-${Date.now()}`
+            : current.id,
+        status: "draft",
+        version: nextVersion,
+        brief:
+          current.status === "saved"
+            ? {
+                ...current.brief,
+                scheduledDate: undefined,
+                scheduledTime: undefined,
+              }
+            : current.brief,
+        movements: [
+          ...current.movements,
+          {
+            id: `${selectedMovement.id}-${Date.now()}`,
+            title: selectedMovement.name,
+            position: selectedMovement.position,
+            duration: selectedMovement.duration,
+            phase: "Main",
+            cue: selectedMovement.cues[0],
+          },
+        ],
+      };
+    });
     setScreen("editor");
   };
   const saveCustomMovement = (movement: LibraryMovement) => {
@@ -5217,6 +5573,7 @@ function BlushBodiesApp() {
     setSessionResult(null);
     setSessionHistory([]);
     setSchedule(initialSchedule);
+    setAssignmentSlotId(undefined);
     setLibraryMovements(initialLibrary);
     setFavourites(["side-leg-lift", "clamshell"]);
     setSelectedMovement(initialLibrary[0]);
@@ -5288,17 +5645,26 @@ function BlushBodiesApp() {
     email: string,
     password: string,
   ): Promise<string | null> => {
+    const attemptKey = signInAttemptKey(chosen, email);
+    const attempt = signInAttempts.get(attemptKey);
+    if (attempt?.blockedUntil && attempt.blockedUntil > Date.now())
+      return signInBlockedMessage(attempt.blockedUntil);
     try {
       const credentials = await readCredentials();
       const credential = credentials.find(
         (item) => item.role === chosen && item.email === email,
       );
-      if (!credential) return "No account was found. Create an account first.";
-      const passwordHash = await hashPassword(password, credential.salt);
-      if (passwordHash !== credential.passwordHash)
-        return Platform.OS === "web"
-          ? "This password does not match the test account saved in this browser. Use Forgot password below to reset it."
+      const passwordHash = await hashPassword(
+        password,
+        credential?.salt ?? INVALID_CREDENTIAL_SALT,
+      );
+      if (!credential || passwordHash !== credential.passwordHash) {
+        const blockedUntil = recordSignInFailure(attemptKey);
+        return blockedUntil
+          ? signInBlockedMessage(blockedUntil)
           : "The email or password is incorrect.";
+      }
+      signInAttempts.delete(attemptKey);
       await loadWorkspace({
         name: credential.name,
         email: credential.email,
@@ -5315,6 +5681,8 @@ function BlushBodiesApp() {
     newAccount: Account,
     password: string,
   ): Promise<string | null> => {
+    const passwordError = passwordValidationError(password);
+    if (passwordError) return passwordError;
     try {
       const credentials = await readCredentials();
       if (
@@ -5330,6 +5698,9 @@ function BlushBodiesApp() {
         ...credentials,
         { ...newAccount, salt, passwordHash },
       ]);
+      signInAttempts.delete(
+        signInAttemptKey(newAccount.role, newAccount.email),
+      );
       resetWorkspace(newAccount);
       setSignedIn(true);
       setScreen(newAccount.role === "instructor" ? "home" : "clientHome");
@@ -5342,6 +5713,8 @@ function BlushBodiesApp() {
     currentPassword: string,
     newPassword: string,
   ): Promise<string | null> => {
+    const passwordError = passwordValidationError(newPassword);
+    if (passwordError) return passwordError;
     try {
       const credentials = await readCredentials();
       const credentialIndex = credentials.findIndex(
@@ -5363,6 +5736,7 @@ function BlushBodiesApp() {
         passwordHash,
       };
       await writeCredentials(nextCredentials);
+      signInAttempts.delete(signInAttemptKey(account.role, account.email));
       return null;
     } catch {
       return "The password could not be updated. Please try again.";
@@ -5373,6 +5747,10 @@ function BlushBodiesApp() {
     email: string,
     newPassword: string,
   ): Promise<string | null> => {
+    if (!ALLOW_SANDBOX_PASSWORD_RESET)
+      return "Local password reset is available only in development builds.";
+    const passwordError = passwordValidationError(newPassword);
+    if (passwordError) return passwordError;
     try {
       const credentials = await readCredentials();
       const credentialIndex = credentials.findIndex(
@@ -5390,6 +5768,7 @@ function BlushBodiesApp() {
         passwordHash,
       };
       await writeCredentials(nextCredentials);
+      signInAttempts.delete(signInAttemptKey(chosenRole, email));
       return null;
     } catch {
       return "The local password could not be reset. Please try again.";
@@ -5490,6 +5869,7 @@ function BlushBodiesApp() {
     return (
       <SignIn
         role="instructor"
+        allowSandboxReset={ALLOW_SANDBOX_PASSWORD_RESET}
         back={() => setScreen("welcome")}
         signup={() => {
           setSignupReturnScreen("signin");
@@ -5552,8 +5932,14 @@ function BlushBodiesApp() {
     return (
       <AssignPlan
         plan={plan}
+        savedPlans={savedPlans}
         schedule={schedule}
-        back={() => setScreen("home")}
+        targetSlotId={assignmentSlotId}
+        back={() => {
+          setAssignmentSlotId(undefined);
+          setScreen(assignmentSlotId ? "home" : "managePlan");
+        }}
+        create={() => setScreen("create")}
         assign={assignPlan}
       />
     );
@@ -5597,7 +5983,10 @@ function BlushBodiesApp() {
           back={() => setScreen("classes")}
           open={() => setScreen("generated")}
           duplicate={duplicatePlan}
-          assign={() => setScreen("assign")}
+          assign={() => {
+            setAssignmentSlotId(undefined);
+            setScreen("assign");
+          }}
           rename={renamePlan}
           remove={deletePlan}
         />
@@ -5646,12 +6035,14 @@ function BlushBodiesApp() {
           <InstructorHome
             schedule={schedule}
             account={account}
-            create={() => setScreen("create")}
-            assign={() =>
-              plan.status === "saved"
-                ? setScreen("assign")
-                : setScreen("generated")
-            }
+            create={() => {
+              setAssignmentSlotId(undefined);
+              setScreen("create");
+            }}
+            assign={(slot) => {
+              setAssignmentSlotId(slot.id);
+              setScreen("assign");
+            }}
             start={startScheduledClass}
             modify={(slot) => {
               setScheduleEditId(slot.id);
@@ -5670,12 +6061,22 @@ function BlushBodiesApp() {
                   ),
               })
             }
-            getPlanTitle={(planId) => findPlan(planId)?.brief.program}
+            getPlanTitle={(slot) => {
+              const assignedPlan = findPlan(slot.planId);
+              return assignedPlan &&
+                planTimingIsValid(assignedPlan) &&
+                planLevel(assignedPlan) === slot.level
+                ? assignedPlan.brief.program
+                : undefined;
+            }}
           />
         ) : null}
         {screen === "create" ? (
           <Create
-            back={() => setScreen("home")}
+            initialClass={schedule.find(
+              (slot) => slot.id === assignmentSlotId,
+            )}
+            back={() => setScreen(assignmentSlotId ? "assign" : "home")}
             generate={(brief) => {
               setPlan(createPlan(brief));
               setScreen("generated");
@@ -5709,12 +6110,27 @@ function BlushBodiesApp() {
           <Classes
             plan={plan}
             change={(movements) =>
-              setPlan((current) => ({
-                ...current,
-                movements,
-                status: "draft",
-                version: current.version + 1,
-              }))
+              setPlan((current) => {
+                const nextVersion = current.version + 1;
+                return {
+                  ...current,
+                  id:
+                    current.status === "saved"
+                      ? `${current.id}-v${nextVersion}-${Date.now()}`
+                      : current.id,
+                  movements,
+                  status: "draft",
+                  version: nextVersion,
+                  brief:
+                    current.status === "saved"
+                      ? {
+                          ...current.brief,
+                          scheduledDate: undefined,
+                          scheduledTime: undefined,
+                        }
+                      : current.brief,
+                };
+              })
             }
             back={() => setScreen("generated")}
             open={() => setScreen("library")}
@@ -6143,6 +6559,7 @@ const s = StyleSheet.create({
     gap: 8,
     maxHeight: "70%",
   },
+  choiceList: { maxHeight: 420 },
   choiceRow: {
     minHeight: 52,
     borderBottomWidth: 1,
@@ -6249,6 +6666,22 @@ const s = StyleSheet.create({
     alignItems: "center",
     gap: 11,
   },
+  assignmentTarget: {
+    minHeight: 84,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: C.pale,
+    backgroundColor: C.card,
+    padding: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  assignmentSelected: {
+    borderWidth: 1,
+    borderColor: C.sage,
+    backgroundColor: C.paleSage,
+  },
   savedPlanRight: { alignItems: "flex-end", gap: 3 },
   recentSession: {
     minHeight: 78,
@@ -6266,6 +6699,7 @@ const s = StyleSheet.create({
     backgroundColor: C.card,
     padding: 16,
     justifyContent: "center",
+    gap: 8,
   },
   quickGrid: { flexDirection: "row", gap: 10 },
   quickAction: {
