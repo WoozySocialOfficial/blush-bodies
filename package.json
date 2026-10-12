@@ -8,12 +8,13 @@
   "dependencies": {
     "@expo/metro-runtime": "~57.0.16",
     "@react-native-async-storage/async-storage": "2.2.0",
-    "expo": "~57.0.26",
-    "expo-asset": "~57.0.18",
-    "expo-constants": "~57.0.20",
+    "expo": "~57.0.27",
+    "expo-asset": "~57.0.19",
+    "expo-audio": "~57.0.5",
+    "expo-constants": "~57.0.21",
     "expo-crypto": "~57.0.3",
     "expo-haptics": "~57.0.3",
-    "expo-notifications": "~57.0.21",
+    "expo-keep-awake": "~57.0.2",
     "expo-secure-store": "~57.0.4",
     "expo-status-bar": "~57.0.1",
     "lodash": "4.18.1",
@@ -23,12 +24,16 @@
     "react-native": "0.86.3",
     "react-native-calendars": "^1.1314.0",
     "react-native-gesture-handler": "~2.32.0",
+    "react-native-safe-area-context": "~5.7.0",
     "react-native-svg": "^15.15.4",
     "react-native-web": "^0.21.2",
     "serve": "^14.2.6"
   },
   "devDependencies": {
+    "@expo/ngrok": "^4.1.0",
     "@types/react": "~19.2.2",
+    "cspell": "^10.3.6",
+    "expo-doctor": "^1.20.4",
     "typescript": "~6.0.3"
   },
   "scripts": {
@@ -36,6 +41,12 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
+    "typecheck": "tsc --noEmit",
+    "spellcheck": "cspell App.tsx index.ts src cspell.json",
+    "doctor": "expo-doctor",
+    "test:planning": "node --experimental-strip-types --test tests/planning.test.mjs",
+    "check:bundles": "expo export --platform all --output-dir .expo-check --clear",
+    "check": "npm run typecheck && npm run test:planning && npm run spellcheck && npm run doctor && npm run check:bundles",
     "build:web": "expo export --platform web --output-dir dist",
     "start:web": "serve -s dist -l $PORT -c ../serve.json"
   },
