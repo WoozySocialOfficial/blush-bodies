@@ -5,12 +5,14 @@ import {
   MOVEMENT_DURATION_SECONDS, PHASES, insertMovement, mergeLibraryCatalog, movementSourceId, nextPlanningPhase,
   orderMovementsByPosition, phaseRemaining, phaseTarget, phaseTotal,
   planLevel, positionGroup, sequenceForTeaching, sequenceWarnings,
-  suggestMovements, updatePlanSequence, classReadiness, selectionDuration, sideLabel, workingSide,
+  suggestMovements, syncMovementImage, updatePlanSequence, classReadiness, selectionDuration, sideLabel, workingSide,
   type ClassPlan, type LibraryMovement, type Phase, type PlanBrief,
   type PlanMovement, type SequenceMode, type SideSelection, type WorkingSide, type ReadinessReport,
 } from "./src/planning";
 import * as Crypto from "expo-crypto";
 import * as Haptics from "expo-haptics";
+import * as FileSystem from "expo-file-system/legacy";
+import * as ImagePicker from "expo-image-picker";
 import { useAudioPlayer } from "expo-audio";
 import { useKeepAwake } from "expo-keep-awake";
 import * as SecureStore from "expo-secure-store";
@@ -37,6 +39,7 @@ import {
   Clock3,
   Heart,
   House,
+  ImagePlus,
   LibraryBig,
   List,
   Pause,
@@ -620,27 +623,84 @@ const movementArtworkSource = (
       return require("./assets/movement-figure-four.jpg");
     case "supine-twist":
       return require("./assets/movement-supine-twist.jpg");
+    case "standing-reach":
+      return require("./assets/movement-standing-reach.jpg");
+    case "hip-circles":
+      return require("./assets/movement-hip-circles.jpg");
+    case "bridge":
+    case "pelvic-curl":
+      return require("./assets/movement-bridge.jpg");
+    case "bird-dog":
+      return require("./assets/movement-bird-dog.jpg");
+    case "standing-side-bend":
+      return require("./assets/movement-standing-side-bend.jpg");
+    case "standing-heel-raise":
+      return require("./assets/movement-standing-heel-raise.jpg");
+    case "seated-march":
+      return require("./assets/movement-seated-march.jpg");
+    case "knee-folds":
+      return require("./assets/movement-knee-folds.jpg");
+    case "heel-slides":
+      return require("./assets/movement-heel-slides.jpg");
+    case "toe-taps":
+      return require("./assets/movement-toe-taps.jpg");
+    case "seated-spine-stretch":
+      return require("./assets/movement-seated-spine-stretch.jpg");
+    case "quadruped-rock-back":
+      return require("./assets/movement-quadruped-rock-back.jpg");
+    case "mountain-breath":
+      return require("./assets/movement-breath-centre.jpg");
+    case "arm-circles":
+      return require("./assets/movement-arm-circles.jpg");
+    case "heel-toe-rocks":
+      return require("./assets/movement-heel-toe-rocks.jpg");
+    case "standing-hip-hinge":
+      return require("./assets/movement-standing-hip-hinge.jpg");
+    case "thoracic-rotation":
+      return require("./assets/movement-thoracic-rotation.jpg");
+    case "thread-the-needle":
+      return require("./assets/movement-thread-the-needle.jpg");
+    case "pelvic-tilt":
+      return require("./assets/movement-pelvic-tilt.jpg");
+    case "knee-sways":
+      return require("./assets/movement-knee-sways.jpg");
+    case "chest-lift":
+      return require("./assets/movement-chest-lift.jpg");
+    case "dead-bug":
+      return require("./assets/movement-dead-bug.jpg");
+    case "swimming":
+      return require("./assets/movement-swimming.jpg");
+    case "swan-prep":
+      return require("./assets/movement-swan-prep.jpg");
+    case "forearm-plank":
+      return require("./assets/movement-forearm-plank.jpg");
+    case "mermaid-stretch":
+      return require("./assets/movement-mermaid-stretch.jpg");
+    case "child-pose":
+      return require("./assets/movement-child-pose.jpg");
+    case "happy-baby":
+      return require("./assets/movement-happy-baby.jpg");
     default:
-      switch (positionGroup(movement.position)) {
-        case "Standing":
-          return require("./assets/movement-roll-down.jpg");
-        case "Kneeling":
-          return require("./assets/movement-donkey-kick.jpg");
-        case "Side-lying":
-          return require("./assets/movement-side-leg-lift.jpg");
-        case "Seated":
-          return require("./assets/movement-spine-twist.jpg");
-        case "Lying on back":
-          return require("./assets/movement-hundred.jpg");
-        default:
-          return require("./assets/movement-cat-cow.jpg");
-      }
+      return undefined;
   }
 };
 const movementArtworkMode = (
   movement: Pick<PlanMovement, "id" | "position" | "sourceMovementId">,
 ) =>
-  ["breath-centre", "closing-breath", "shoulder-rolls", "roll-down"].includes(movementSourceId(movement))
+  [
+    "breath-centre",
+    "closing-breath",
+    "shoulder-rolls",
+    "roll-down",
+    "standing-reach",
+    "hip-circles",
+    "standing-side-bend",
+    "standing-heel-raise",
+    "mountain-breath",
+    "arm-circles",
+    "heel-toe-rocks",
+    "standing-hip-hinge",
+  ].includes(movementSourceId(movement))
     ? "contain"
     : "cover";
 const createLegacyPlan = (brief: PlanBrief): ClassPlan => ({
@@ -886,14 +946,16 @@ const createPlan = (brief: PlanBrief): ClassPlan => {
 };
 
 function MovementVisual({ movement, style, label, resizeMode }: {
-  movement: Pick<PlanMovement, "id" | "position" | "sourceMovementId">;
+  movement: Pick<PlanMovement, "id" | "position" | "sourceMovementId" | "imageUri">;
   style: StyleProp<ImageStyle>;
   label: string;
   resizeMode?: "cover" | "contain";
 }) {
-  const source = movementArtworkSource(movement);
+  const source = movement.imageUri ? { uri: movement.imageUri } : movementArtworkSource(movement);
   return source ? (
-    <Image source={source} style={style} resizeMode={resizeMode ?? movementArtworkMode(movement)} accessibilityLabel={label} />
+    <Image source={source} style={style}
+      resizeMode={resizeMode ?? (movement.imageUri ? "cover" : movementArtworkMode(movement))}
+      accessibilityLabel={label} />
   ) : (
     <View style={[style as StyleProp<ViewStyle>, s.pendingVisual]} accessibilityLabel="Movement visual pending">
       <UserRound size={24} color={C.rose} />
@@ -3459,6 +3521,8 @@ function Library({
         (filter === "All" ||
           (filter === "Favourites" && favouriteIds.has(movement.id)) ||
           (filter === "Needs review" && movement.reviewStatus === "needs-review") ||
+          (PHASES.includes(filter as Phase) &&
+            (movement.phases ?? ["Main"]).includes(filter as Phase)) ||
           positionGroup(movement.position) === positionGroup(filter)) &&
         (!needle ||
           [
@@ -3499,9 +3563,13 @@ function Library({
           "All",
           "Favourites",
           "Needs review",
+          "Warm-up",
+          "Main",
+          "Cool-down",
           "Standing",
           "Side-lying",
           "Supine",
+          "Prone",
           "Seated",
           "Kneeling",
         ].map((option) => (
@@ -3539,6 +3607,7 @@ function Library({
           <View style={s.flex}>
             <Text style={s.moveTitle}>{movement.name}</Text>
             {movement.reviewStatus === "needs-review" ? <Text style={s.reviewBadge}>NEEDS REVIEW</Text> : null}
+            <Text style={s.libraryPhase}>{(movement.phases ?? ["Main"]).join(" / ")}</Text>
             <Text style={s.sub}>
               {movement.level} / {movement.position} / {movement.equipment}
             </Text>
@@ -3580,7 +3649,42 @@ function CustomMovement({
   const [cue, setCue] = useState(initialMovement?.cues.join("\n") ?? "");
   const [phases, setPhases] = useState<Phase[]>(initialMovement?.phases ?? [initialPhase ?? "Main"]);
   const [sideMode, setSideMode] = useState<"together" | "paired" | "alternating">(initialMovement?.sideMode ?? "together");
+  const [imageUri, setImageUri] = useState(initialMovement?.imageUri);
   const [error, setError] = useState("");
+  const pickImage = async () => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsEditing: Platform.OS !== "web",
+        aspect: [4, 3],
+        quality: 0.82,
+        base64: Platform.OS === "web",
+      });
+      if (result.canceled || !result.assets[0]) return;
+      const asset = result.assets[0];
+      if (Platform.OS === "web") {
+        setImageUri(asset.base64
+          ? `data:image/jpeg;base64,${asset.base64}`
+          : asset.uri);
+        setError("");
+        return;
+      }
+      if (!FileSystem.documentDirectory) throw new Error("Movement photo storage is unavailable.");
+      const directory = `${FileSystem.documentDirectory}movement-images/`;
+      await FileSystem.makeDirectoryAsync(directory, { intermediates: true });
+      const mimeExtension = asset.mimeType?.split("/")[1]?.replace("jpeg", "jpg");
+      const uriExtension = asset.uri.split(".").pop()?.split(/[?#]/)[0]?.toLowerCase();
+      const extension = mimeExtension || uriExtension || "jpg";
+      const movementId = (initialMovement?.id || name.trim() || "movement")
+        .replace(/[^a-z0-9-]/gi, "-").toLowerCase();
+      const destination = `${directory}${movementId}-${Date.now()}.${extension}`;
+      await FileSystem.copyAsync({ from: asset.uri, to: destination });
+      setImageUri(destination);
+      setError("");
+    } catch {
+      setError("That photo could not be saved. Please choose another image.");
+    }
+  };
   const submit = () => {
     if (!name.trim()) {
       setError("Enter a movement name.");
@@ -3590,9 +3694,14 @@ function CustomMovement({
       setError("Add teaching cues and select at least one phase before approving.");
       return;
     }
+    if (!imageUri && !initialMovement) {
+      setError("Add a movement photo before approving this movement.");
+      return;
+    }
     save({
       id: initialMovement?.id ?? `custom-${Crypto.randomUUID()}`,
       name: name.trim(),
+      imageUri,
       position,
       level,
       equipment: equipment.trim() || "None",
@@ -3608,6 +3717,40 @@ function CustomMovement({
       <ScrollView contentContainerStyle={s.page}>
         <Header title={initialMovement ? "Review Movement" : "New Movement"} back={back} />
         <View style={s.form}>
+          <Text style={s.label}>MOVEMENT PHOTO</Text>
+          <View style={s.customImageFrame}>
+            {imageUri || initialMovement ? (
+              <MovementVisual
+                movement={{
+                  id: initialMovement?.id ?? "custom-preview",
+                  sourceMovementId: initialMovement?.id,
+                  position,
+                  imageUri,
+                }}
+                style={s.customImage}
+                label={name ? `${name} movement photo` : "Movement photo preview"}
+              />
+            ) : (
+              <View style={s.customImagePlaceholder}>
+                <ImagePlus size={30} color={C.rose} />
+                <Text style={s.sub}>Add a clear 4:3 movement photo</Text>
+              </View>
+            )}
+          </View>
+          <View style={s.customImageActions}>
+            <Pressable onPress={pickImage} style={s.imageAction}
+              accessibilityRole="button" accessibilityLabel={imageUri || initialMovement ? "Change movement photo" : "Add movement photo"}>
+              <ImagePlus size={17} color={C.rose} />
+              <Text style={s.imageActionText}>{imageUri || initialMovement ? "Change photo" : "Add photo"}</Text>
+            </Pressable>
+            {imageUri ? (
+              <Pressable onPress={() => setImageUri(undefined)} style={s.imageAction}
+                accessibilityRole="button" accessibilityLabel="Remove movement photo">
+                <Trash2 size={17} color={C.rose} />
+                <Text style={s.imageActionText}>Remove</Text>
+              </Pressable>
+            ) : null}
+          </View>
           <Text style={s.label}>MOVEMENT NAME</Text>
           <TextInput
             value={name}
@@ -5136,6 +5279,13 @@ function BlushBodiesApp() {
   const saveCustomMovement = (movement: LibraryMovement) => {
     const reviewed = { ...movement, reviewedBy: account.name, reviewedAt: Date.now() };
     setLibraryMovements((current) => [reviewed, ...current.filter((item) => item.id !== movement.id)]);
+    setPlan((current) => syncMovementImage(current, movement.id, movement.imageUri));
+    setSavedPlans((current) => current.map((saved) =>
+      syncMovementImage(saved, movement.id, movement.imageUri)));
+    setActiveTeachingSession((current) => current ? {
+      ...current,
+      plan: syncMovementImage(current.plan, movement.id, movement.imageUri),
+    } : current);
     setSelectedMovement(reviewed);
     setMovementToReview(undefined);
     setScreen("details");
@@ -5813,6 +5963,7 @@ const s = StyleSheet.create({
   readinessError: { color: C.rose, fontSize: 13, lineHeight: 20 },
   pendingVisual: { alignItems: "center", justifyContent: "center", backgroundColor: C.pale },
   reviewBadge: { color: C.gold, fontSize: 10, fontWeight: "800", marginVertical: 3 },
+  libraryPhase: { color: C.rose, fontSize: 10, fontWeight: "800", marginTop: 2 },
   libraryDuration: { alignItems: "flex-end", minWidth: 42 },
   sideCheckbox: { width: 24, height: 24, borderRadius: 4, borderWidth: 1, borderColor: C.rose,
     alignItems: "center", justifyContent: "center" },
@@ -6926,6 +7077,35 @@ const s = StyleSheet.create({
     overflow: "hidden",
   },
   thumbImage: { width: "100%", height: "100%" },
+  customImageFrame: {
+    width: "100%",
+    aspectRatio: 4 / 3,
+    maxHeight: 260,
+    borderRadius: 8,
+    backgroundColor: C.pale,
+    overflow: "hidden",
+  },
+  customImage: { width: "100%", height: "100%" },
+  customImagePlaceholder: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+  },
+  customImageActions: { flexDirection: "row", gap: 10 },
+  imageAction: {
+    minHeight: 44,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingHorizontal: 14,
+    borderWidth: 1,
+    borderColor: C.line,
+    borderRadius: 8,
+    backgroundColor: C.card,
+  },
+  imageActionText: { color: C.rose, fontSize: 13, fontWeight: "800" },
   stats: { flexDirection: "row", flexWrap: "wrap", gap: 14 },
   stat: {
     width: "47%",

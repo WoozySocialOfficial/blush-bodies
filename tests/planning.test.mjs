@@ -4,7 +4,7 @@ import {
   insertMovement, mergeLibraryCatalog, movementSourceId, nextPlanningPhase,
   orderMovementsByPosition, phaseRemaining, phaseTotal, positionGroup,
   sequenceForTeaching, sequenceWarnings, suggestMovements, updatePlanSequence,
-  classReadiness, selectionDuration, sideLabel, workingSide, MOVEMENT_DURATION_SECONDS,
+  classReadiness, selectionDuration, sideLabel, syncMovementImage, workingSide, MOVEMENT_DURATION_SECONDS,
 } from "../src/planning.ts";
 import { additionalMovements } from "../src/catalogue.ts";
 import { scheduleTimeOptions } from "../src/scheduling.ts";
@@ -72,11 +72,24 @@ test("auto order groups custom positions consistently", () => {
 test("library additions insert into the phase and position group", () => {
   const original = plan([movement("warm", "Standing", "Warm-up"), movement("seated", "Seated"),
     movement("cool", "Supine", "Cool-down")]);
-  const next = insertMovement(original, libraryMovement("reach"), "Main", "new-instance");
+  const next = insertMovement(original, libraryMovement("reach", { imageUri: "file:///movement.jpg" }), "Main", "new-instance");
   assert.deepEqual(ids(next), ["warm", "new-instance", "seated", "cool"]);
   assert.equal(next[1].sourceMovementId, "reach");
+  assert.equal(next[1].imageUri, "file:///movement.jpg");
   assert.equal(next[1].duration, 75);
   assert.equal(original.movements.length, 3);
+});
+
+test("movement photo changes propagate to existing class cards", () => {
+  const existing = plan([{
+    ...movement("instance"),
+    sourceMovementId: "custom-jump-rope",
+    imageUri: "file:///old.jpg",
+  }]);
+  const changed = syncMovementImage(existing, "custom-jump-rope", "file:///new.jpg");
+  assert.equal(changed.movements[0].imageUri, "file:///new.jpg");
+  assert.equal(existing.movements[0].imageUri, "file:///old.jpg");
+  assert.equal(syncMovementImage(changed, "custom-jump-rope").movements[0].imageUri, undefined);
 });
 
 test("manual addition and teaching preserve instructor order", () => {
@@ -332,12 +345,30 @@ test("readiness blocks a movement assigned outside its approved phases", () => {
   assert.equal(classReadiness(draft, [source]).ready, true);
 });
 
-test("catalogue additions stay samples with standard movement timing", () => {
-  assert.equal(additionalMovements.length, 13);
-  assert(additionalMovements.every((item) => item.reviewStatus === "needs-review"));
+test("catalogue additions are reviewed, cued and use standard movement timing", () => {
+  assert.equal(additionalMovements.length, 29);
+  assert(additionalMovements.every((item) => item.reviewStatus === "reviewed"));
   assert.equal(new Set(additionalMovements.map((item) => item.id)).size, additionalMovements.length);
   assert(additionalMovements.every((item) => item.duration === MOVEMENT_DURATION_SECONDS));
+  assert(additionalMovements.every((item) => item.cues.length >= 1));
+  assert(additionalMovements.every((item) => item.phases.length > 0));
+  assert(additionalMovements.some((item) => item.phases.includes("Warm-up")));
   assert(additionalMovements.some((item) => item.phases.includes("Main")));
+  assert(additionalMovements.some((item) => item.phases.includes("Cool-down")));
+});
+
+test("catalogue review and cues migrate into previously stored samples", () => {
+  const curated = libraryMovement("hip-circles", {
+    cues: ["Keep the pelvis controlled."],
+    reviewStatus: "reviewed",
+  });
+  const storedSample = libraryMovement("hip-circles", {
+    cues: [],
+    reviewStatus: "needs-review",
+  });
+  const [merged] = mergeLibraryCatalog([curated], [storedSample]);
+  assert.equal(merged.reviewStatus, "reviewed");
+  assert.deepEqual(merged.cues, curated.cues);
 });
 
 test("catalogue merges preserve instructor approvals and explicit side choices", () => {

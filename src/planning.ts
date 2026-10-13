@@ -15,6 +15,7 @@ export type PlanBrief = {
 export type PlanMovement = {
   id: string;
   sourceMovementId?: string;
+  imageUri?: string;
   side?: WorkingSide;
   requiresPair?: boolean;
   pairId?: string;
@@ -35,6 +36,7 @@ export type ClassPlan = {
 export type LibraryMovement = {
   id: string;
   name: string;
+  imageUri?: string;
   position: string;
   level: string;
   equipment: string;
@@ -54,14 +56,32 @@ export const mergeLibraryCatalog = (catalog: LibraryMovement[], stored: LibraryM
       const baseline = catalog.find((item) => item.id === movement.id);
       const phases = movement.phases ?? baseline?.phases;
       const sideMode = movement.sideMode ?? baseline?.sideMode;
+      const cues = movement.cues?.length ? movement.cues : baseline?.cues ?? [];
+      const reviewStatus = baseline?.reviewStatus === "reviewed"
+        ? "reviewed"
+        : movement.reviewStatus ?? baseline?.reviewStatus;
       return baseline ? { ...baseline, ...movement,
         ...(phases ? { phases } : {}),
         ...(sideMode ? { sideMode } : {}),
+        cues,
+        ...(reviewStatus ? { reviewStatus } : {}),
       } : movement;
     }),
     ...catalog.filter((movement) => !existing.has(movement.id)),
   ].map((movement) => ({ ...movement, duration: MOVEMENT_DURATION_SECONDS }));
 };
+
+export const syncMovementImage = (
+  plan: ClassPlan,
+  movementId: string,
+  imageUri?: string,
+): ClassPlan => ({
+  ...plan,
+  movements: plan.movements.map((movement) =>
+    movementSourceId(movement) === movementId
+      ? { ...movement, imageUri }
+      : movement),
+});
 
 export const PHASES: Phase[] = ["Warm-up", "Main", "Cool-down"];
 export const phaseTarget = (phase: Phase) => phase === "Main" ? 2100 : 300;
@@ -84,7 +104,8 @@ export const positionGroup = (position: string) => {
   if (normalized.includes("seated") || normalized.includes("sitting")) return "Seated";
   if (/side-lying|sidelying|lying on (left|right)/.test(normalized)) return "Side-lying";
   if (normalized.includes("back") || normalized.includes("supine")) return "Lying on back";
-  if (normalized.includes("front") || normalized.includes("prone")) return "Lying on front";
+  if (normalized.includes("front") || normalized.includes("prone") || normalized.includes("plank"))
+    return "Lying on front";
   return position;
 };
 const positionOrder: Record<Phase, string[]> = {
@@ -173,6 +194,7 @@ export const insertMovement = (
   const added = sides.map((side): PlanMovement => ({
     id: sides.length > 1 ? `${id}-${side}` : id,
     sourceMovementId: movement.id,
+    imageUri: movement.imageUri,
     title: movement.name,
     position: movement.sideMode === "paired" && positionGroup(movement.position) === "Side-lying"
       ? side === "left" ? "Right side-lying" : "Left side-lying" : movement.position,
