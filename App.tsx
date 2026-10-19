@@ -150,6 +150,7 @@ type LocalCredential = {
 type StoredAppData = {
   account: Account;
   plan: ClassPlan;
+  hasActiveDraft: boolean;
   savedPlans: ClassPlan[];
   sessionHistory: SessionResult[];
   schedule: ScheduledClass[];
@@ -3053,21 +3054,34 @@ function Classes({
 }
 function Plans({
   plan,
+  hasActiveDraft,
   savedPlans,
   lastSession,
   create,
   open,
   duplicate,
+  removeDraft,
   select,
 }: {
   plan: ClassPlan;
+  hasActiveDraft: boolean;
   savedPlans: ClassPlan[];
   lastSession: SessionResult | null;
   create: () => void;
   open: () => void;
   duplicate: () => void;
+  removeDraft: () => void;
   select: (plan: ClassPlan) => void;
 }) {
+  const confirmDeleteDraft = () =>
+    confirmAction({
+      title: "Delete draft?",
+      message: `${plan.brief.program} will be permanently discarded. Saved plans and assigned classes will stay unchanged.`,
+      confirmText: "Delete Draft",
+      cancelText: "Keep Draft",
+      destructive: true,
+      onConfirm: removeDraft,
+    });
   const reusablePlans =
     plan.status === "saved"
       ? [plan, ...savedPlans.filter((saved) => saved.id !== plan.id)]
@@ -3083,7 +3097,7 @@ function Plans({
           <Plus size={22} color={C.rose} />
         </Pressable>
       </View>
-      {plan.status === "draft" ? (
+      {hasActiveDraft && plan.status === "draft" ? (
         <>
           <Text style={s.group}>DRAFT IN PROGRESS</Text>
           <Pressable onPress={open} style={s.currentPlan}>
@@ -3116,6 +3130,14 @@ function Plans({
             </View>
             <Pressable onPress={duplicate} style={s.iconAction}>
               <RefreshCw size={18} color={C.rose} />
+            </Pressable>
+            <Pressable
+              onPress={confirmDeleteDraft}
+              style={[s.iconAction, s.deleteDraftAction]}
+              accessibilityRole="button"
+              accessibilityLabel="Delete draft"
+            >
+              <Trash2 size={18} color="#A34848" />
             </Pressable>
           </View>
         </>
@@ -3201,6 +3223,7 @@ function Details({
   movement,
   plan,
   initialPhase,
+  planning,
   favourite,
   back,
   toggle,
@@ -3210,6 +3233,7 @@ function Details({
   movement: LibraryMovement;
   plan: ClassPlan;
   initialPhase?: Phase;
+  planning: boolean;
   favourite: boolean;
   back: () => void;
   toggle: () => void;
@@ -3265,7 +3289,7 @@ function Details({
             <Text style={s.cueText}>{cue}</Text>
           </View>
         ))}
-        {movement.sideMode === "paired" ? (
+        {planning && movement.sideMode === "paired" ? (
           <>
             <Text style={s.label}>PARTICIPANT WORKING SIDE</Text>
             <View style={s.options}>
@@ -3278,26 +3302,33 @@ function Details({
             <Text style={s.sub}>{side === "both" ? "2 cards" : "1 card"} / {fmt(duration)} total</Text>
           </>
         ) : null}
-        <Text style={s.label}>ADD TO PHASE</Text>
-        <View style={s.options}>
-          {PHASES.map((option) => (
-            <Pressable key={option} onPress={() => setPhase(option)} accessibilityRole="radio"
-              aria-checked={phase === option}>
-              <Pill label={option} active={phase === option} />
-            </Pressable>
-          ))}
-        </View>
-        <Text style={s.sub}>{plan.brief.program} / {phase}</Text>
-        <Text style={remaining < duration ? s.planningWarning : s.sequenceNotice}>
-          {remaining < duration
-            ? `Adding this movement puts ${phase.toLowerCase()} ${fmt(duration - remaining)} over target.`
-            : `${fmt(remaining - duration)} remaining after this movement.`}
-        </Text>
+        {planning ? (
+          <>
+            <Text style={s.label}>ADD TO PHASE</Text>
+            <View style={s.options}>
+              {PHASES.map((option) => (
+                <Pressable key={option} onPress={() => setPhase(option)} accessibilityRole="radio"
+                  aria-checked={phase === option}>
+                  <Pill label={option} active={phase === option} />
+                </Pressable>
+              ))}
+            </View>
+            <Text style={s.sub}>{plan.brief.program} / {phase}</Text>
+            <Text style={remaining < duration ? s.planningWarning : s.sequenceNotice}>
+              {remaining < duration
+                ? `Adding this movement puts ${phase.toLowerCase()} ${fmt(duration - remaining)} over target.`
+                : `${fmt(remaining - duration)} remaining after this movement.`}
+            </Text>
+          </>
+        ) : null}
       </ScrollView>
       <View style={s.sticky}>
         <Main
-          label={movement.reviewStatus === "needs-review" ? "Review Movement" : "Add to Plan"}
-          onPress={() => movement.reviewStatus === "needs-review" ? review() : add(phase, side)}
+          label={movement.reviewStatus === "needs-review"
+            ? "Review Movement"
+            : planning ? "Add to Plan" : "Edit Movement"}
+          onPress={() => movement.reviewStatus === "needs-review" || !planning
+            ? review() : add(phase, side)}
         />
       </View>
     </View>
@@ -3498,6 +3529,7 @@ function SessionDetails({
 function Library({
   movements,
   favourites,
+  notice,
   open,
   create,
   toggle,
@@ -3505,6 +3537,7 @@ function Library({
 }: {
   movements: LibraryMovement[];
   favourites: string[];
+  notice?: string;
   open: (movement: LibraryMovement) => void;
   create: () => void;
   toggle: (id: string) => void;
@@ -3578,6 +3611,7 @@ function Library({
           </Pressable>
         ))}
       </ScrollView>
+      {notice ? <Text style={s.sequenceNotice}>{notice}</Text> : null}
       <Text style={s.group}>{visible.length} MOVEMENTS</Text>
     </View>
   );
@@ -3691,11 +3725,11 @@ function CustomMovement({
       return;
     }
     if (!cue.trim() || !phases.length) {
-      setError("Add teaching cues and select at least one phase before approving.");
+      setError("Add teaching cues and select at least one phase before saving.");
       return;
     }
     if (!imageUri && !initialMovement) {
-      setError("Add a movement photo before approving this movement.");
+      setError("Add a movement photo before saving this movement.");
       return;
     }
     save({
@@ -3715,7 +3749,9 @@ function CustomMovement({
   return (
     <View style={s.flex}>
       <ScrollView contentContainerStyle={s.page}>
-        <Header title={initialMovement ? "Review Movement" : "New Movement"} back={back} />
+        <Header title={initialMovement
+          ? initialMovement.reviewStatus === "needs-review" ? "Review Movement" : "Edit Movement"
+          : "New Movement"} back={back} />
         <View style={s.form}>
           <Text style={s.label}>MOVEMENT PHOTO</Text>
           <View style={s.customImageFrame}>
@@ -3823,7 +3859,7 @@ function CustomMovement({
         </View>
       </ScrollView>
       <View style={s.sticky}>
-        <Main label="Approve Movement" onPress={submit} />
+        <Main label="Save to Library" onPress={submit} />
       </View>
     </View>
   );
@@ -4738,23 +4774,28 @@ function TeachingSession({
       {Platform.OS !== "web" ? <TeachingKeepAwake /> : null}
       <View style={[s.teachContent, compactTeachingView && s.teachContentCompact]}>
       <View style={[s.teachTop, compactTeachingView && s.teachTopCompact]}>
-        <Pressable onPress={pauseAndExit} style={s.teachClose}>
-          <X size={21} color="#EEE0E3" />
+        <Pressable
+          onPress={pauseAndExit}
+          style={[s.avatar, s.teachClose]}
+          accessibilityRole="button"
+          accessibilityLabel="Pause and leave class"
+        >
+          <X size={20} color={C.rose} />
         </Pressable>
         <View style={s.flex}>
-          <Text style={s.teachPlanMeta}>
-            {classLevel} · {plan.brief.week} · {plan.brief.day}
+          <Text style={s.outlineText}>
+            {classLevel}
           </Text>
-          <Text style={s.teachSequence}>
-            {current.phase === "Main" ? "Main Sequence" : current.phase}
+          <Text style={[s.sub, s.teachSequence]}>
+            {plan.brief.week} · {plan.brief.day}
           </Text>
         </View>
       </View>
       <View style={[s.teachTimerBlock, compactTeachingView && s.teachTimerBlockCompact]}>
         <View style={s.teachTimerHeading}>
-          <Text style={s.teachTimerLabel}>{held ? "TIMER HELD" : "TIME REMAINING"}</Text>
+          <Text style={s.label}>{held ? "PAUSED" : "TIME REMAINING"}</Text>
           <Text style={s.teachStepLabel}>
-            STEP {index + 1} OF {movements.length}
+            Step {index + 1} of {movements.length}
           </Text>
         </View>
         <View style={s.teachTimerRow}>
@@ -4781,19 +4822,11 @@ function TeachingSession({
         ]}
       >
         <View style={s.movementCardHeader}>
-          <View style={s.movementPhaseBadge}>
-            <Text style={s.movementPhaseText}>
-              {current.phase === "Main"
-                ? "MAIN SEQUENCE"
-                : current.phase.toUpperCase()}
-            </Text>
-          </View>
-          <View style={s.movementPositionBadge}>
-            <Text style={s.movementPositionText}>{current.position}</Text>
-          </View>
+          <Pill label={current.phase === "Main" ? "Main sequence" : current.phase} active />
+          <Pill label={current.position} active green />
         </View>
-        <Text style={[s.movementCardTitle, compactTeachingView && s.movementCardTitleCompact]}>{current.title}</Text>
-        {sideLabel(current) ? <Text style={s.workingSide}>PARTICIPANT / {sideLabel(current)}</Text> : null}
+        <Text style={[s.headerTitle, s.movementCardTitle, compactTeachingView && s.movementCardTitleCompact]}>{current.title}</Text>
+        {sideLabel(current) ? <Text style={[s.sub, s.movementWorkingSide]}>Participant · {sideLabel(current)}</Text> : null}
         <View style={s.movementProgressRow}>
           <Text style={s.movementCardCount}>
             Class progress
@@ -4816,14 +4849,9 @@ function TeachingSession({
             style={s.movementArtworkImage}
             label={`Demonstration image for ${current.title}`}
           />
-          <View style={s.movementArtworkStep}>
-            <Text style={s.movementArtworkStepText}>
-              {index + 1}/{movements.length}
-            </Text>
-          </View>
         </View>
         <View style={s.movementCue}>
-          <Text style={s.movementCueLabel}>COACHING CUE</Text>
+          <Text style={[s.label, s.movementCueLabel]}>COACHING CUE</Text>
           <Text style={s.movementCueText}>{current.cue}</Text>
         </View>
       </Animated.View>
@@ -4832,43 +4860,58 @@ function TeachingSession({
           <Pressable
             onPress={() => go(index - 1)}
             disabled={index === 0}
-            style={[s.navControl, index === 0 && s.disabled]}
+            style={[s.iconAction, s.navControl, index === 0 && s.disabled]}
+            accessibilityRole="button"
+            accessibilityLabel="Previous movement"
+            accessibilityState={{ disabled: index === 0 }}
           >
             <ChevronLeft size={22} color={C.ink} />
           </Pressable>
-          <Text style={s.controlLabel}>Previous</Text>
+          <Text style={[s.stepLabel, s.controlLabel]}>Previous</Text>
         </View>
         <View style={s.teachControlGroup}>
-          <Pressable onPress={toggleHold} style={s.hold}>
+          <Pressable
+            onPress={toggleHold}
+            style={[s.main, s.hold]}
+            accessibilityRole="button"
+            accessibilityLabel={held ? "Resume timer" : "Pause timer"}
+          >
             {held ? (
               <Play size={21} color={C.white} fill={C.white} />
             ) : (
               <Pause size={21} color={C.white} fill={C.white} />
             )}
           </Pressable>
-          <Text style={s.controlLabel}>{held ? "Resume" : "Hold"}</Text>
+          <Text style={[s.stepLabel, s.controlLabel]}>{held ? "Resume" : "Pause"}</Text>
         </View>
         <View style={s.teachControlGroup}>
-          <Pressable onPress={nextStep} style={s.navControl}>
-            <ChevronRight size={22} color={C.ink} />
+          <Pressable
+            onPress={nextStep}
+            style={[s.iconAction, s.navControl]}
+            accessibilityRole="button"
+            accessibilityLabel={upcoming ? "Next movement" : "Finish class"}
+          >
+            {upcoming ? <ChevronRight size={22} color={C.ink} /> : <Check size={22} color={C.ink} />}
           </Pressable>
-          <Text style={s.controlLabel}>Next</Text>
+          <Text style={[s.stepLabel, s.controlLabel]}>{upcoming ? "Next" : "Finish"}</Text>
         </View>
       </View>
       <Pressable
         onPress={() => (upcoming ? go(index + 1) : confirmEnd())}
-        style={s.upNext}
+        style={[s.upNext, !upcoming && s.upNextComplete]}
+        accessibilityRole="button"
+        accessibilityLabel={upcoming ? `Next movement: ${upcoming.title}` : "Finish class and view summary"}
       >
         <View style={s.flex}>
-          <Text style={s.nextMovementLabel}>
-            {upcoming ? "UP NEXT" : "SESSION COMPLETE"}
+          <Text style={s.label}>
+            {upcoming ? "UP NEXT" : "FINAL MOVEMENT"}
           </Text>
-          <Text style={s.upText} numberOfLines={1}>
+          <Text style={[s.outlineText, s.upText]} numberOfLines={1}>
             {upcoming
               ? upcoming.title
-              : "Complete class and review summary"}
+              : "Finish & View Summary"}
           </Text>
-          {upcoming && sideLabel(upcoming) ? <Text style={s.suggestionReason} numberOfLines={1}>{sideLabel(upcoming)}</Text> : null}
+          {upcoming && sideLabel(upcoming) ? <Text style={s.upNextSide} numberOfLines={1}>{sideLabel(upcoming)}</Text> : null}
           {upcoming ? (
             <View style={s.upNextMeta}>
               <Text style={s.upTime}>{fmt(upcoming.duration)}</Text>
@@ -4889,12 +4932,11 @@ function TeachingSession({
             </View>
           </View>
         ) : (
-          <ChevronRight size={20} color="#D9C8CC" />
+          <ChevronRight size={20} color={C.rose} />
         )}
       </Pressable>
-      <Pressable onPress={confirmEnd} style={s.endClass}>
-        <X size={14} color={C.rose} />
-        <Text style={s.endClassText}>End Class</Text>
+      <Pressable onPress={confirmEnd} style={s.endClass} accessibilityRole="button">
+        <Text style={[s.stepLabel, s.endClassText]}>End Class</Text>
       </Pressable>
       </View>
     </View>
@@ -4922,9 +4964,11 @@ function BlushBodiesApp() {
     }),
   );
   const [savedPlans, setSavedPlans] = useState<ClassPlan[]>([]);
+  const [hasActiveDraft, setHasActiveDraft] = useState(true);
   const [sequenceHistory, setSequenceHistory] = useState<ClassPlan[]>([]);
   const [sequenceNotice, setSequenceNotice] = useState("");
   const [libraryPlanPhase, setLibraryPlanPhase] = useState<Phase | undefined>();
+  const [libraryNotice, setLibraryNotice] = useState("");
   const [editorPhase, setEditorPhase] = useState<"All" | Phase>("All");
   const [sessionResult, setSessionResult] = useState<SessionResult | null>(
     null,
@@ -4972,6 +5016,7 @@ function BlushBodiesApp() {
     const stored: StoredAppData = {
       account,
       plan,
+      hasActiveDraft,
       savedPlans,
       sessionHistory,
       schedule,
@@ -4988,6 +5033,7 @@ function BlushBodiesApp() {
     signedIn,
     account,
     plan,
+    hasActiveDraft,
     savedPlans,
     sessionHistory,
     schedule,
@@ -5036,6 +5082,7 @@ function BlushBodiesApp() {
         scheduledTime: undefined,
       },
     }));
+    setHasActiveDraft(true);
     setScreen("generated");
   };
   const persistPlan = () => {
@@ -5043,6 +5090,7 @@ function BlushBodiesApp() {
     setSequenceNotice("");
     const saved = { ...plan, status: "saved" as const };
     setPlan(saved);
+    setHasActiveDraft(false);
     setSavedPlans((current) => [
       saved,
       ...current.filter((item) => item.id !== saved.id),
@@ -5109,9 +5157,8 @@ function BlushBodiesApp() {
     setSequenceHistory([]);
     setSequenceNotice("");
     const deletedId = plan.id;
-    setSavedPlans((current) =>
-      current.filter((saved) => saved.id !== deletedId),
-    );
+    const remainingPlans = savedPlans.filter((saved) => saved.id !== deletedId);
+    setSavedPlans(remainingPlans);
     setSchedule((current) =>
       current.map((slot) =>
         slot.planId === deletedId
@@ -5119,12 +5166,30 @@ function BlushBodiesApp() {
           : slot,
       ),
     );
-    setPlan((current) => ({
-      ...current,
-      id: `BB-${Date.now()}`,
-      version: 1,
-      status: "draft",
-    }));
+    setPlan(remainingPlans[0] ?? createDefaultPlan());
+    setHasActiveDraft(false);
+    setScreen("classes");
+  };
+  const deleteDraft = () => {
+    if (!hasActiveDraft || plan.status !== "draft") return;
+    const draftDate = plan.brief.scheduledDate;
+    const draftTime = plan.brief.scheduledTime;
+    setSequenceHistory([]);
+    setSequenceNotice("");
+    setLibraryPlanPhase(undefined);
+    setHasActiveDraft(false);
+    if (draftDate && draftTime) {
+      setSchedule((current) =>
+        current.map((slot) =>
+          slot.status === "DRAFT" &&
+          slot.date === draftDate &&
+          slot.time === draftTime
+            ? { ...slot, status: "NEEDS PLAN" }
+            : slot,
+        ),
+      );
+    }
+    setPlan(savedPlans[0] ?? createDefaultPlan());
     setScreen("classes");
   };
   const assignPlan = (slotId: string, planId: string) => {
@@ -5142,6 +5207,7 @@ function BlushBodiesApp() {
       ),
     );
     setPlan(selectedPlan);
+    setHasActiveDraft(false);
     setAssignmentSlotId(undefined);
     setScreen("home");
   };
@@ -5153,6 +5219,7 @@ function BlushBodiesApp() {
     setSequenceHistory([]);
     setSequenceNotice("");
     setPlan(activeTeachingSession.plan);
+    setHasActiveDraft(false);
     setScreen("teach");
   };
   const openSessionDetails = (
@@ -5193,6 +5260,7 @@ function BlushBodiesApp() {
     }
     if (!classReadiness(selectedPlan, libraryMovements).ready) {
       setPlan(selectedPlan);
+      setHasActiveDraft(false);
       setSequenceHistory([]);
       setSequenceNotice("Resolve the class readiness issues before teaching.");
       setScreen("editor");
@@ -5217,6 +5285,7 @@ function BlushBodiesApp() {
     setSequenceHistory([]);
     setSequenceNotice("");
     setPlan(selectedPlan);
+    setHasActiveDraft(false);
     if (scheduledClassId) {
       setSchedule((current) =>
         current.map((slot) =>
@@ -5241,6 +5310,7 @@ function BlushBodiesApp() {
     }
     if (!classReadiness(assignedPlan, libraryMovements).ready) {
       setPlan(assignedPlan);
+      setHasActiveDraft(false);
       Alert.alert(
         "Plan needs review",
         "Review the timing, sides and movement content before teaching.",
@@ -5259,12 +5329,14 @@ function BlushBodiesApp() {
   const changeSequence = (movements: PlanMovement[], mode?: SequenceMode) => {
     setSequenceHistory((history) => [...history.slice(-19), plan]);
     setPlan(updatePlanSequence(plan, movements, mode));
+    setHasActiveDraft(true);
     setSequenceNotice("");
   };
   const undoSequence = () => {
     const previous = sequenceHistory[sequenceHistory.length - 1];
     if (!previous) return;
     setPlan(previous);
+    setHasActiveDraft(previous.status === "draft");
     setSequenceHistory((history) => history.slice(0, -1));
     setSequenceNotice("Last sequence change undone.");
   };
@@ -5288,7 +5360,8 @@ function BlushBodiesApp() {
     } : current);
     setSelectedMovement(reviewed);
     setMovementToReview(undefined);
-    setScreen("details");
+    setLibraryNotice(`${movement.name} saved to the library.`);
+    setScreen(libraryPlanPhase ? "details" : "library");
   };
   const createDefaultPlan = () =>
     createPlan({
@@ -5305,6 +5378,7 @@ function BlushBodiesApp() {
     setLibraryPlanPhase(undefined);
     setAccount(owner);
     setPlan(createDefaultPlan());
+    setHasActiveDraft(true);
     setSavedPlans([]);
     setSessionResult(null);
     setSelectedSession(null);
@@ -5339,6 +5413,9 @@ function BlushBodiesApp() {
       phone: stored.account?.phone,
     });
     setPlan(stored.plan ?? createDefaultPlan());
+    setHasActiveDraft(
+      stored.hasActiveDraft ?? (stored.plan ? stored.plan.status === "draft" : true),
+    );
     setSavedPlans(stored.savedPlans ?? []);
     setSessionResult(null);
     setSelectedSession(null);
@@ -5824,6 +5901,7 @@ function BlushBodiesApp() {
               setEditorPhase("All");
               const created = createPlan(brief);
               setPlan(fromScratch ? { ...created, movements: [] } : created);
+              setHasActiveDraft(true);
               setSequenceHistory([]);
               setSequenceNotice("");
               setLibraryPlanPhase(undefined);
@@ -5844,16 +5922,19 @@ function BlushBodiesApp() {
         {screen === "classes" ? (
           <Plans
             plan={plan}
+            hasActiveDraft={hasActiveDraft}
             savedPlans={savedPlans}
             lastSession={sessionResult}
             create={() => setScreen("create")}
             open={() => setScreen("generated")}
             duplicate={duplicatePlan}
+            removeDraft={deleteDraft}
             select={(selected) => {
               setEditorPhase("All");
               setSequenceHistory([]);
               setSequenceNotice("");
               setPlan(selected);
+              setHasActiveDraft(false);
               setScreen("managePlan");
             }}
           />
@@ -5888,6 +5969,7 @@ function BlushBodiesApp() {
             movement={selectedMovement}
             plan={plan}
             initialPhase={libraryPlanPhase}
+            planning={Boolean(libraryPlanPhase)}
             favourite={favourites.includes(selectedMovement.id)}
             back={() => setScreen("library")}
             toggle={() => toggleFavourite(selectedMovement.id)}
@@ -5915,11 +5997,14 @@ function BlushBodiesApp() {
             } : undefined}
             movements={libraryMovements}
             favourites={favourites}
+            notice={libraryNotice}
             open={(movement) => {
+              setLibraryNotice("");
               setSelectedMovement(movement);
               setScreen("details");
             }}
             create={() => {
+              setLibraryNotice("");
               setMovementToReview(undefined);
               setScreen("customMovement");
             }}
@@ -6470,6 +6555,10 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  deleteDraftAction: {
+    borderColor: "#E7C5C5",
+    backgroundColor: "#FFF3F3",
+  },
   savedPlan: {
     minHeight: 66,
     borderRadius: 15,
@@ -6765,28 +6854,24 @@ const s = StyleSheet.create({
   teachContent: {
     flex: 1,
     paddingHorizontal: 20,
-    paddingBottom: Platform.OS === "ios" ? 28 : 16,
+    paddingBottom: Platform.OS === "ios" ? 20 : 8,
   },
   teachContentCompact: { paddingHorizontal: 14, paddingBottom: 8 },
   teachTop: {
-    minHeight: 62,
+    minHeight: 52,
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
   },
-  teachTopCompact: { minHeight: 52 },
+  teachTopCompact: { minHeight: 44 },
   teachClose: {
     width: 38,
     height: 38,
     borderRadius: 19,
-    backgroundColor: C.ink,
-    alignItems: "center",
-    justifyContent: "center",
   },
-  teachPlanMeta: { color: C.ink, fontSize: 13, fontWeight: "800" },
-  teachSequence: { color: C.muted, fontSize: 11, marginTop: 3 },
+  teachSequence: { fontSize: 11 },
   teachTimerBlock: {
-    paddingVertical: 8,
+    paddingVertical: 4,
     paddingHorizontal: 2,
   },
   teachTimerBlockCompact: { paddingVertical: 4 },
@@ -6795,8 +6880,7 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
-  teachTimerLabel: { color: C.rose, fontSize: 9, fontWeight: "900" },
-  teachStepLabel: { color: C.muted, fontSize: 9, fontWeight: "800" },
+  teachStepLabel: { color: C.muted, fontSize: 11, fontWeight: "500" },
   teachTimerRow: {
     flexDirection: "row",
     alignItems: "baseline",
@@ -6804,13 +6888,13 @@ const s = StyleSheet.create({
     gap: 7,
     marginTop: 2,
   },
-  teachTimer: { color: C.ink, fontSize: 40, fontWeight: "900" },
+  teachTimer: { color: C.ink, fontSize: 40, fontWeight: "800", fontVariant: ["tabular-nums"] },
   teachTimerCompact: { fontSize: 34 },
-  teachTimerTotal: { color: C.muted, fontSize: 12, fontWeight: "700" },
+  teachTimerTotal: { color: C.muted, fontSize: 12, fontWeight: "400" },
   teachTimerTrack: {
-    height: 5,
+    height: 3,
     borderRadius: 3,
-    backgroundColor: "#E9DFDD",
+    backgroundColor: "#EEE5E2",
     overflow: "hidden",
     marginTop: 6,
   },
@@ -6821,17 +6905,17 @@ const s = StyleSheet.create({
   },
   movementCard: {
     flex: 1,
-    minHeight: 280,
-    maxHeight: 440,
-    marginTop: 8,
+    minHeight: 0,
+    marginTop: 6,
     backgroundColor: C.card,
     borderWidth: 1,
     borderColor: C.line,
     borderRadius: 18,
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 18,
     overflow: "hidden",
   },
-  movementCardCompact: { minHeight: 260, padding: 12, marginTop: 5 },
+  movementCardCompact: { paddingHorizontal: 12, paddingVertical: 12, marginTop: 5 },
   movementCardHeader: {
     flexDirection: "row",
     alignItems: "center",
@@ -6840,38 +6924,18 @@ const s = StyleSheet.create({
   },
   movementCardCount: {
     color: C.muted,
-    fontSize: 11,
-    fontWeight: "700",
-    marginTop: 6,
+    fontSize: 10,
+    fontWeight: "500",
   },
-  movementPhaseBadge: {
-    minHeight: 25,
-    alignSelf: "flex-start",
-    borderRadius: 13,
-    backgroundColor: "#F5E6E8",
-    paddingHorizontal: 9,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  movementPhaseText: { color: C.rose, fontSize: 9, fontWeight: "900" },
-  movementPositionBadge: {
-    minHeight: 25,
-    borderRadius: 13,
-    backgroundColor: C.paleSage,
-    paddingHorizontal: 10,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  movementPositionText: { color: C.sage, fontSize: 9, fontWeight: "900" },
   movementProgressRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    marginTop: 8,
+    marginTop: 14,
   },
-  movementProgressValue: { color: C.rose, fontSize: 10, fontWeight: "900" },
+  movementProgressValue: { color: C.sage, fontSize: 10, fontWeight: "600" },
   movementProgressTrack: {
-    height: 4,
+    height: 3,
     borderRadius: 2,
     backgroundColor: "#F0E7E5",
     overflow: "hidden",
@@ -6885,61 +6949,41 @@ const s = StyleSheet.create({
   movementArtwork: {
     width: "100%",
     flex: 1,
-    minHeight: 92,
+    minHeight: 0,
     borderRadius: 13,
     backgroundColor: "#F4E3E3",
-    marginTop: 12,
+    marginTop: 14,
     overflow: "hidden",
   },
   movementArtworkImage: { width: "100%", height: "100%" },
-  movementArtworkStep: {
-    position: "absolute",
-    right: 10,
-    top: 10,
-    minWidth: 38,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: "rgba(255,255,255,0.92)",
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 8,
-  },
-  movementArtworkStepText: { color: C.ink, fontSize: 10, fontWeight: "900" },
-  movementCardTitle: {
-    color: C.ink,
-    fontSize: 23,
-    fontWeight: "900",
-    marginTop: 8,
-  },
+  movementCardTitle: { marginTop: 12 },
   movementCardTitleCompact: { fontSize: 20, marginTop: 6 },
+  movementWorkingSide: { marginTop: 4 },
   movementCue: {
-    minHeight: 62,
+    minHeight: 66,
     justifyContent: "center",
     backgroundColor: "#FBF3F3",
-    borderLeftWidth: 3,
+    borderLeftWidth: 2,
     borderLeftColor: C.rose,
-    borderRadius: 8,
-    marginTop: 12,
+    borderRadius: 10,
+    marginTop: 14,
     paddingHorizontal: 12,
-    paddingVertical: 9,
+    paddingVertical: 10,
   },
   movementCueLabel: {
     color: C.rose,
-    fontSize: 8,
-    fontWeight: "900",
     marginBottom: 4,
   },
   movementCueText: {
     color: C.ink,
     fontSize: 13,
-    fontWeight: "800",
     lineHeight: 18,
   },
   controls: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-around",
-    marginTop: 12,
+    marginTop: 8,
   },
   controlsCompact: { marginTop: 7 },
   teachControlGroup: { width: 76, alignItems: "center", gap: 6 },
@@ -6947,39 +6991,30 @@ const s = StyleSheet.create({
     width: 48,
     height: 48,
     borderRadius: 24,
-    backgroundColor: "#EEE7E5",
-    alignItems: "center",
-    justifyContent: "center",
   },
-  controlLabel: {
-    color: C.muted,
-    fontSize: 10,
-    fontWeight: "700",
-  },
+  controlLabel: { fontSize: 11 },
   hold: {
     width: 54,
     height: 54,
     borderRadius: 27,
-    backgroundColor: C.rose,
-    alignItems: "center",
-    justifyContent: "center",
   },
   upNext: {
-    height: 96,
+    height: 76,
     flexShrink: 0,
     backgroundColor: C.card,
     borderRadius: 12,
     borderWidth: 1,
     borderColor: C.line,
     paddingLeft: 14,
-    paddingVertical: 10,
+    paddingVertical: 6,
     flexDirection: "row",
     alignItems: "center",
-    marginTop: 10,
+    marginTop: 8,
     overflow: "hidden",
   },
-  nextMovementLabel: { color: C.rose, fontSize: 9, fontWeight: "900" },
-  upText: { color: C.ink, fontSize: 13, fontWeight: "800", marginTop: 5 },
+  upNextComplete: { paddingRight: 14 },
+  upText: { fontSize: 13, marginTop: 3 },
+  upNextSide: { color: C.muted, fontSize: 10, marginTop: 2 },
   upNextMeta: {
     flexDirection: "row",
     alignItems: "center",
@@ -6987,11 +7022,11 @@ const s = StyleSheet.create({
     marginTop: 5,
   },
   upTime: { color: C.muted, fontSize: 10 },
-  upNextDot: { color: C.rose, fontSize: 10, fontWeight: "900" },
+  upNextDot: { color: C.muted, fontSize: 10 },
   upNextVisual: {
     width: 128,
-    height: 96,
-    marginVertical: -10,
+    height: 76,
+    marginVertical: -6,
     backgroundColor: "#F4E3E3",
     overflow: "hidden",
   },
@@ -7009,14 +7044,14 @@ const s = StyleSheet.create({
     justifyContent: "center",
   },
   endClass: {
-    height: 38,
+    height: 32,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
     gap: 6,
-    marginTop: 8,
+    marginTop: 4,
   },
-  endClassText: { color: C.rose, fontSize: 11, fontWeight: "800" },
+  endClassText: { fontSize: 11 },
   summaryHero: {
     minHeight: 170,
     backgroundColor: C.card,
