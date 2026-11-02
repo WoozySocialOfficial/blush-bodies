@@ -7,7 +7,17 @@ import {
   classReadiness, selectionDuration, sideLabel, syncMovementImage, workingSide, MOVEMENT_DURATION_SECONDS,
 } from "../src/planning.ts";
 import { additionalMovements } from "../src/catalogue.ts";
-import { scheduleTimeOptions } from "../src/scheduling.ts";
+import {
+  filterSchedule, isFutureScheduleSlot, nextAvailableClassSlot, rescheduleSlot,
+  scheduleSlotsOverlap, scheduleTimeOptions,
+} from "../src/scheduling.ts";
+import {
+  classCalendarDates, classCalendarIcs, googleCalendarUrl,
+} from "../src/calendar.ts";
+import {
+  RECENTLY_DELETED_RETENTION_DAYS, pruneRecentlyDeleted,
+  recentlyDeletedDaysRemaining, restoreScheduleAssignments,
+} from "../src/recentlyDeleted.ts";
 
 const movement = (id, position = "Standing", phase = "Main", duration = MOVEMENT_DURATION_SECONDS) => ({
   id, title: id, position, phase, duration, cue: "Test cue",
@@ -30,6 +40,142 @@ test("today's class times begin at the next quarter hour", () => {
   assert.equal(today[0], "16:45");
   assert(!today.includes("08:00"));
   assert.equal(scheduleTimeOptions("2026-10-03", now)[0], "00:00");
+});
+
+test("next available class slots follow live time and avoid 45-minute overlaps", () => {
+  const now = new Date(2026, 9, 2, 16, 42, 0);
+  assert.deepEqual(nextAvailableClassSlot([], now), {
+    date: "2026-10-02",
+    time: "16:45",
+  });
+  assert.deepEqual(
+    nextAvailableClassSlot([{ date: "2026-10-02", time: "16:45" }], now),
+    { date: "2026-10-02", time: "17:30" },
+  );
+  assert.equal(
+    isFutureScheduleSlot({ date: "2026-10-02", time: "16:30" }, now),
+    false,
+  );
+});
+
+test("next available class slots roll to the next studio day after closing", () => {
+  const now = new Date(2026, 9, 2, 20, 1, 0);
+  assert.deepEqual(nextAvailableClassSlot([], now), {
+    date: "2026-10-03",
+    time: "08:00",
+  });
+});
+
+test("rescheduling preserves class assignment data and rejects overlaps", () => {
+  const scheduled = {
+    id: "class-one",
+    date: "2026-10-22",
+    time: "08:00",
+    status: "READY",
+    planId: "plan-one",
+  };
+  assert.deepEqual(rescheduleSlot(scheduled, "2026-10-23", "10:15"), {
+    ...scheduled,
+    date: "2026-10-23",
+    time: "10:15",
+  });
+  assert.equal(
+    scheduleSlotsOverlap(
+      { date: "2026-10-23", time: "10:15" },
+      { date: "2026-10-23", time: "10:45" },
+    ),
+    true,
+  );
+  assert.equal(
+    scheduleSlotsOverlap(
+      { date: "2026-10-23", time: "10:15" },
+      { date: "2026-10-23", time: "11:00" },
+    ),
+    false,
+  );
+});
+
+test("recently deleted items expire after the retention window", () => {
+  const day = 24 * 60 * 60 * 1000;
+  const now = Date.UTC(2026, 9, 21, 12);
+  const items = [
+    { id: "current", deletedAt: now - 2 * day },
+    { id: "expired", deletedAt: now - RECENTLY_DELETED_RETENTION_DAYS * day },
+  ];
+  assert.deepEqual(pruneRecentlyDeleted(items, now).map((item) => item.id), [
+    "current",
+  ]);
+  assert.equal(recentlyDeletedDaysRemaining(items[0].deletedAt, now), 28);
+  assert.equal(recentlyDeletedDaysRemaining(items[1].deletedAt, now), 0);
+});
+
+test("restoring a plan reconnects open classes without replacing newer assignments", () => {
+  const schedule = [
+    { id: "open", status: "NEEDS PLAN" },
+    { id: "taken", status: "READY", planId: "newer-plan" },
+    { id: "other", status: "NEEDS PLAN" },
+  ];
+  assert.deepEqual(
+    restoreScheduleAssignments(
+      schedule,
+      [
+        { id: "open", status: "READY" },
+        { id: "taken", status: "IN PROGRESS" },
+      ],
+      "restored-plan",
+    ),
+    [
+      { id: "open", status: "READY", planId: "restored-plan" },
+      { id: "taken", status: "READY", planId: "newer-plan" },
+      { id: "other", status: "NEEDS PLAN" },
+    ],
+  );
+});
+
+test("schedule filters separate operational class states", () => {
+  const now = new Date(2026, 9, 21, 10, 0);
+  const schedule = [
+    { id: "ready", date: "2026-10-22", time: "09:00", status: "READY" },
+    { id: "complete", date: "2026-10-20", time: "09:00", status: "COMPLETED" },
+    { id: "needed", date: "2026-10-23", time: "09:00", status: "NEEDS PLAN" },
+    { id: "draft", date: "2026-10-24", time: "09:00", status: "DRAFT" },
+    { id: "cancelled", date: "2026-10-25", time: "09:00", status: "CANCELLED" },
+  ];
+  assert.deepEqual(filterSchedule(schedule, "Upcoming", now).map((slot) => slot.id), [
+    "ready", "needed", "draft",
+  ]);
+  assert.deepEqual(filterSchedule(schedule, "Completed", now).map((slot) => slot.id), ["complete"]);
+  assert.deepEqual(filterSchedule(schedule, "Needs plan", now).map((slot) => slot.id), ["needed"]);
+  assert.deepEqual(filterSchedule(schedule, "Drafts", now).map((slot) => slot.id), ["draft"]);
+  assert.deepEqual(filterSchedule(schedule, "Cancelled", now).map((slot) => slot.id), ["cancelled"]);
+});
+
+test("cancelled classes do not block the next available time", () => {
+  const now = new Date(2026, 9, 21, 8, 0);
+  assert.deepEqual(
+    nextAvailableClassSlot(
+      [{ date: "2026-10-21", time: "08:15", status: "CANCELLED" }],
+      now,
+    ),
+    { date: "2026-10-21", time: "08:15" },
+  );
+});
+
+test("calendar exports keep the class time and a 45-minute duration", () => {
+  const scheduledClass = {
+    id: "class-one",
+    date: "2026-10-22",
+    time: "09:15",
+    level: "Beginner",
+    lesson: "Week 1 / Day 1",
+  };
+  const { start, end } = classCalendarDates(scheduledClass);
+  assert.equal((end.getTime() - start.getTime()) / 60000, 45);
+  const ics = classCalendarIcs(scheduledClass, new Date("2026-10-21T10:00:00Z"));
+  assert.match(ics, /BEGIN:VEVENT/);
+  assert.match(ics, /SUMMARY:Blush Bodies Beginner Class/);
+  assert.match(ics, /DTEND:/);
+  assert.match(googleCalendarUrl(scheduledClass), /calendar\.google\.com/);
 });
 
 test("auto order groups positions and phases without mutating the input", () => {
@@ -203,6 +349,13 @@ test("existing libraries receive new catalogue entries without replacing custom 
   assert.deepEqual(merged[0].phases, ["Warm-up"]);
   assert.deepEqual(mergeLibraryCatalog(catalog, merged), merged);
   assert.equal(stored[0].phases, undefined);
+});
+
+test("deleted library movements stay excluded when the catalogue is merged", () => {
+  const catalog = [libraryMovement("keep"), libraryMovement("remove")];
+  const stored = [libraryMovement("custom"), libraryMovement("remove", { name: "Edited" })];
+  const merged = mergeLibraryCatalog(catalog, stored, ["remove"]);
+  assert.deepEqual(merged.map((item) => item.id), ["custom", "keep"]);
 });
 
 test("both sides produce linked cards with the correct supporting positions and total", () => {

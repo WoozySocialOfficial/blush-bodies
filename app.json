@@ -38,7 +38,17 @@
           "cameraPermission": false,
           "microphonePermission": false
         }
-      ]
+      ],
+      "expo-sharing",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": false,
+          "recordAudioAndroid": false,
+          "enableBackgroundPlayback": false
+        }
+      ],
+      "expo-status-bar"
     ]
   }
 }

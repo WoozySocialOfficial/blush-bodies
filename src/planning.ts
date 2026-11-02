@@ -49,10 +49,16 @@ export type LibraryMovement = {
   reviewedAt?: number;
 };
 
-export const mergeLibraryCatalog = (catalog: LibraryMovement[], stored: LibraryMovement[]) => {
-  const existing = new Set(stored.map((movement) => movement.id));
+export const mergeLibraryCatalog = (
+  catalog: LibraryMovement[],
+  stored: LibraryMovement[],
+  deletedMovementIds: string[] = [],
+) => {
+  const deleted = new Set(deletedMovementIds);
+  const availableStored = stored.filter((movement) => !deleted.has(movement.id));
+  const existing = new Set(availableStored.map((movement) => movement.id));
   return [
-    ...stored.map((movement) => {
+    ...availableStored.map((movement) => {
       const baseline = catalog.find((item) => item.id === movement.id);
       const phases = movement.phases ?? baseline?.phases;
       const sideMode = movement.sideMode ?? baseline?.sideMode;
@@ -67,7 +73,8 @@ export const mergeLibraryCatalog = (catalog: LibraryMovement[], stored: LibraryM
         ...(reviewStatus ? { reviewStatus } : {}),
       } : movement;
     }),
-    ...catalog.filter((movement) => !existing.has(movement.id)),
+    ...catalog.filter((movement) =>
+      !deleted.has(movement.id) && !existing.has(movement.id)),
   ].map((movement) => ({ ...movement, duration: MOVEMENT_DURATION_SECONDS }));
 };
 

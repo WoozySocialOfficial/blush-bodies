@@ -1,0 +1,56 @@
+diff --git a/node_modules/@expo/metro-file-map/build/crawlers/node/fallback.js b/node_modules/@expo/metro-file-map/build/crawlers/node/fallback.js
+index d2e3531..7a5b4c6 100644
+--- a/node_modules/@expo/metro-file-map/build/crawlers/node/fallback.js
++++ b/node_modules/@expo/metro-file-map/build/crawlers/node/fallback.js
+@@ -84,12 +84,20 @@ function createFallbackFilesystem(opts) {
+             return null;
+         }
+         const result = dirNode ?? new Map();
+-        for (const entry of dirEntries){
++        for (let entry of dirEntries){
+             const name = entry.name.toString();
+             const childAbsolutePath = absolutePath + _path().default.sep + name;
+             if (ignore(childAbsolutePath)) {
+                 continue;
+             }
++            // Windows cloud files can look like symlinks in Dirent but be regular files.
++            if (process.platform === 'win32' && entry.isSymbolicLink()) {
++                try {
++                    entry = _fs().default.lstatSync(childAbsolutePath);
++                } catch {
++                    continue;
++                }
++            }
+             if (entry.isDirectory()) {
+                 // NOTE(@kitten): ".git" and ".hg" check replace the VCS_DIRECTORIES ignore pattern
+                 // NOTE(@kitten): `.cxx` is ephemeral and should always be safe to ignore
+diff --git a/node_modules/@expo/metro-file-map/build/crawlers/node/index.js b/node_modules/@expo/metro-file-map/build/crawlers/node/index.js
+index a2c3c70..623148b 100644
+--- a/node_modules/@expo/metro-file-map/build/crawlers/node/index.js
++++ b/node_modules/@expo/metro-file-map/build/crawlers/node/index.js
+@@ -93,15 +93,23 @@ function find(roots, extensions, ignore, includeSymlinks, rootDir, console, prev
+         );
+         */ } else {
+                 for(let idx = 0; idx < entries.length; idx++){
+-                    const entry = entries[idx];
++                    let entry = entries[idx];
+                     const name = entry.name;
++                    const file = directory + _path().sep + name;
++                    // Windows cloud files can look like symlinks in Dirent but be regular files.
++                    if (process.platform === 'win32' && entry.isSymbolicLink()) {
++                        try {
++                            entry = _fs().lstatSync(file);
++                        } catch {
++                            continue;
++                        }
++                    }
+                     // NOTE(@kitten): This replaces the VCS_DIRECTORIES ignore pattern
+                     // NOTE(@kitten): `.cxx` is ephemeral and should always be safe to ignore
+                     const isDirectory = entry.isDirectory();
+                     if (isDirectory && (name === '.git' || name === '.hg' || name === '.cxx')) {
+                         continue;
+                     }
+-                    const file = directory + _path().sep + name;
+                     const isSymbolicLink = entry.isSymbolicLink();
+                     if (ignore(file) || !includeSymlinks && isSymbolicLink) {
+                         continue;

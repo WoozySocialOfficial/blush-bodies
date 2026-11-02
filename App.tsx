@@ -1,6 +1,25 @@
 import { StatusBar } from "expo-status-bar";
 import { additionalMovements } from "./src/catalogue";
-import { scheduleTimeOptions, timeFromMinutes } from "./src/scheduling";
+import {
+  filterSchedule,
+  isFutureScheduleSlot,
+  nextAvailableClassSlot,
+  rescheduleSlot,
+  scheduleSlotsOverlap,
+  scheduleTimeOptions,
+  timeFromMinutes,
+  type ScheduleFilter,
+} from "./src/scheduling";
+import {
+  classCalendarFileName,
+  classCalendarIcs,
+  googleCalendarUrl,
+} from "./src/calendar";
+import {
+  pruneRecentlyDeleted,
+  recentlyDeletedDaysRemaining,
+  restoreScheduleAssignments,
+} from "./src/recentlyDeleted";
 import {
   MOVEMENT_DURATION_SECONDS, PHASES, insertMovement, mergeLibraryCatalog, movementSourceId, nextPlanningPhase,
   orderMovementsByPosition, phaseRemaining, phaseTarget, phaseTotal,
@@ -13,15 +32,14 @@ import * as Crypto from "expo-crypto";
 import * as Haptics from "expo-haptics";
 import * as FileSystem from "expo-file-system/legacy";
 import * as ImagePicker from "expo-image-picker";
+import * as Sharing from "expo-sharing";
 import { useAudioPlayer } from "expo-audio";
 import { useKeepAwake } from "expo-keep-awake";
 import * as SecureStore from "expo-secure-store";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Calendar, type DateData } from "react-native-calendars";
-import {
-  GestureHandlerRootView,
-  Swipeable,
-} from "react-native-gesture-handler";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
+import Swipeable from "react-native-gesture-handler/ReanimatedSwipeable";
 import {
   SafeAreaProvider,
   useSafeAreaInsets,
@@ -32,6 +50,7 @@ import {
   ArrowUp,
   BarChart3,
   CalendarDays,
+  CalendarPlus,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -68,6 +87,7 @@ import {
   Easing,
   FlatList,
   Image,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -100,6 +120,7 @@ type Screen =
   | "sessionDetails"
   | "assign"
   | "schedule"
+  | "recentlyDeleted"
   | "managePlan"
   | "dataSettings"
   | "changePassword";
@@ -131,13 +152,38 @@ type ScheduledClass = {
   time: string;
   level: string;
   lesson: string;
-  status: "READY" | "NEEDS PLAN" | "DRAFT" | "IN PROGRESS" | "COMPLETED";
+  status:
+    | "READY"
+    | "NEEDS PLAN"
+    | "DRAFT"
+    | "IN PROGRESS"
+    | "COMPLETED"
+    | "CANCELLED";
   planId?: string;
 };
+type DeletedScheduleAssignment = Pick<ScheduledClass, "id" | "status">;
+type RecentlyDeletedItem =
+  | {
+      id: string;
+      kind: "movement";
+      deletedAt: number;
+      movement: LibraryMovement;
+    }
+  | {
+      id: string;
+      kind: "draft" | "plan";
+      deletedAt: number;
+      plan: ClassPlan;
+      assignments: DeletedScheduleAssignment[];
+    };
+type PendingUndo =
+  | { kind: "deleted"; message: string; item: RecentlyDeletedItem }
+  | { kind: "cancelled"; message: string; scheduledClass: ScheduledClass };
 type InstructorPreferences = {
   teachingMode: "Guided" | "Minimal";
   vibration: boolean;
   countdownSound: boolean;
+  completionSound: boolean;
   offline: boolean;
 };
 type LocalCredential = {
@@ -155,6 +201,8 @@ type StoredAppData = {
   sessionHistory: SessionResult[];
   schedule: ScheduledClass[];
   libraryMovements: LibraryMovement[];
+  deletedMovementIds: string[];
+  recentlyDeleted: RecentlyDeletedItem[];
   favourites: string[];
   instructorPreferences: InstructorPreferences;
   activeTeachingSession?: ActiveTeachingSession;
@@ -266,8 +314,8 @@ const deleteCredentials = async (): Promise<void> => {
 };
 const localDateKey = (date = new Date()) =>
   `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-const dateKeyFromOffset = (days: number) => {
-  const date = new Date();
+const dateKeyFromOffset = (days: number, from = new Date()) => {
+  const date = new Date(from);
   date.setHours(12, 0, 0, 0);
   date.setDate(date.getDate() + days);
   return localDateKey(date);
@@ -294,6 +342,61 @@ const classDateLabel = (key: string, long = false) => {
     day: "numeric",
     month: long ? "long" : "short",
   });
+};
+const openGoogleCalendar = async (scheduledClass: ScheduledClass) => {
+  const url = googleCalendarUrl(scheduledClass);
+  if (!(await Linking.canOpenURL(url)))
+    throw new Error("Google Calendar is unavailable.");
+  await Linking.openURL(url);
+};
+const shareCalendarEvent = async (scheduledClass: ScheduledClass) => {
+  if (!FileSystem.cacheDirectory)
+    throw new Error("Calendar file storage is unavailable.");
+  if (!(await Sharing.isAvailableAsync()))
+    throw new Error("Calendar sharing is unavailable on this device.");
+  const path = `${FileSystem.cacheDirectory}${classCalendarFileName(scheduledClass)}`;
+  await FileSystem.writeAsStringAsync(path, classCalendarIcs(scheduledClass), {
+    encoding: FileSystem.EncodingType.UTF8,
+  });
+  await Sharing.shareAsync(path, {
+    dialogTitle: "Add class to calendar",
+    mimeType: "text/calendar",
+    UTI: "public.ics",
+  });
+};
+const addClassToCalendar = (scheduledClass: ScheduledClass) => {
+  const handleError = () =>
+    Alert.alert(
+      "Calendar unavailable",
+      "The class could not be opened in a calendar. Please try again.",
+    );
+  if (Platform.OS === "web") {
+    void openGoogleCalendar(scheduledClass).catch(handleError);
+    return;
+  }
+  Alert.alert(
+    "Add to calendar",
+    `${classDateLabel(scheduledClass.date, true)} at ${scheduledClass.time}`,
+    [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Apple / Other",
+        onPress: () => void shareCalendarEvent(scheduledClass).catch(handleError),
+      },
+      {
+        text: "Google Calendar",
+        onPress: () => void openGoogleCalendar(scheduledClass).catch(handleError),
+      },
+    ],
+  );
+};
+const useLiveNow = () => {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+  return now;
 };
 const PROGRAM_DAY_OPTIONS = Array.from({ length: 4 }, (_, weekIndex) =>
   Array.from(
@@ -1035,6 +1138,40 @@ function Outline({ label, onPress }: { label: string; onPress: () => void }) {
     </Pressable>
   );
 }
+function UndoBanner({
+  message,
+  undo,
+  dismiss,
+}: {
+  message: string;
+  undo: () => void;
+  dismiss: () => void;
+}) {
+  return (
+    <View style={s.undoBanner} accessibilityLiveRegion="polite">
+      <Text style={s.undoBannerText} numberOfLines={2}>
+        {message}
+      </Text>
+      <Pressable
+        onPress={undo}
+        style={s.undoBannerAction}
+        accessibilityRole="button"
+        accessibilityLabel="Undo last deletion"
+      >
+        <Undo2 size={16} color={C.white} />
+        <Text style={s.undoBannerActionText}>Undo</Text>
+      </Pressable>
+      <Pressable
+        onPress={dismiss}
+        hitSlop={10}
+        accessibilityRole="button"
+        accessibilityLabel="Dismiss undo"
+      >
+        <X size={17} color={C.white} />
+      </Pressable>
+    </View>
+  );
+}
 function Header({
   title,
   back,
@@ -1546,6 +1683,8 @@ function SignUp({
 function InstructorHome({
   schedule,
   account,
+  selectedDate,
+  setSelectedDate,
   activeSession,
   create,
   assign,
@@ -1558,6 +1697,8 @@ function InstructorHome({
 }: {
   schedule: ScheduledClass[];
   account: Account;
+  selectedDate: string;
+  setSelectedDate: (date: string) => void;
   activeSession?: ActiveTeachingSession;
   create: () => void;
   assign: (slot: ScheduledClass) => void;
@@ -1569,13 +1710,16 @@ function InstructorHome({
   getPlanTitle: (slot: ScheduledClass) => string | undefined;
 }) {
   const firstName = account.name.split(" ")[0];
-  const [selectedDate, setSelectedDate] = useState(localDateKey());
+  const now = useLiveNow();
+  const today = localDateKey(now);
   const swipeBlockedUntil = useRef<Record<string, number>>({});
-  const visibleSchedule = schedule.filter((item) => item.date === selectedDate);
+  const visibleSchedule = schedule.filter(
+    (item) => item.date === selectedDate && item.status !== "CANCELLED",
+  );
   const readyCount = visibleSchedule.filter(
     (item) => item.planId && item.status === "READY",
   ).length;
-  const hour = new Date().getHours();
+  const hour = now.getHours();
   const greeting =
     hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
   const beginSwipe = (id: string) => {
@@ -1586,8 +1730,11 @@ function InstructorHome({
   };
   const swipeIsBlocked = (id: string) =>
     (swipeBlockedUntil.current[id] ?? 0) > Date.now();
+  useEffect(() => {
+    if (selectedDate < today) setSelectedDate(today);
+  }, [selectedDate, setSelectedDate, today]);
   const upcomingDays = Array.from({ length: 5 }, (_, offset) => {
-    const key = dateKeyFromOffset(offset);
+    const key = dateKeyFromOffset(offset, now);
     const date = dateFromKey(key);
     return {
       key,
@@ -1665,7 +1812,7 @@ function InstructorHome({
               key={slot.id}
               overshootRight={false}
               rightThreshold={64}
-              dragOffsetFromRightEdge={18}
+              dragOffsetFromRight={-18}
               onSwipeableOpenStartDrag={() => beginSwipe(slot.id)}
               onSwipeableCloseStartDrag={() => beginSwipe(slot.id)}
               onSwipeableOpen={() => finishSwipe(slot.id)}
@@ -1674,25 +1821,25 @@ function InstructorHome({
                 <View style={s.swipeActions}>
                   <Pressable
                     accessibilityRole="button"
-                    accessibilityLabel={`Edit ${slot.level} class`}
+                    accessibilityLabel={`Reschedule ${slot.level} class`}
                     onPress={() => {
                       if (!swipeIsBlocked(slot.id)) modify(slot);
                     }}
                     style={s.swipeEdit}
                   >
-                    <Pencil size={18} color={C.white} />
-                    <Text style={s.swipeActionText}>Edit</Text>
+                    <CalendarDays size={18} color={C.white} />
+                    <Text style={s.swipeActionText}>Reschedule</Text>
                   </Pressable>
                   <Pressable
                     accessibilityRole="button"
-                    accessibilityLabel={`Delete ${slot.level} class`}
+                    accessibilityLabel={`Cancel ${slot.level} class`}
                     onPress={() => {
                       if (!swipeIsBlocked(slot.id)) remove(slot);
                     }}
                     style={s.swipeDelete}
                   >
                     <Trash2 size={18} color={C.white} />
-                    <Text style={s.swipeActionText}>Delete</Text>
+                    <Text style={s.swipeActionText}>Cancel</Text>
                   </Pressable>
                 </View>
               )}
@@ -1802,6 +1949,8 @@ function AssignPlan({
   back,
   create,
   assign,
+  scheduleNext,
+  openSchedule,
 }: {
   plan: ClassPlan;
   library: LibraryMovement[];
@@ -1811,7 +1960,10 @@ function AssignPlan({
   back: () => void;
   create: () => void;
   assign: (slotId: string, planId: string) => void;
+  scheduleNext: () => void;
+  openSchedule: () => void;
 }) {
+  const now = useLiveNow();
   const target = schedule.find((slot) => slot.id === targetSlotId);
   const reviewedPlans = [plan, ...savedPlans]
     .filter(
@@ -1830,7 +1982,14 @@ function AssignPlan({
   );
   const futureSchedule = schedule.filter(
     (slot) =>
-      slot.date >= localDateKey() && slot.level === planLevel(plan),
+      slot.status !== "CANCELLED" &&
+      slot.status !== "COMPLETED" &&
+      isFutureScheduleSlot(slot, now) &&
+      slot.level === planLevel(plan),
+  ).sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
+  const nextAvailable = useMemo(
+    () => nextAvailableClassSlot(schedule, now),
+    [now, schedule],
   );
   const confirmAssignment = (slot: ScheduledClass, selectedPlan: ClassPlan) => {
     if (slot.planId === selectedPlan.id) return;
@@ -1859,7 +2018,7 @@ function AssignPlan({
           <Text style={s.sub}>
             Choose the reviewed plan this scheduled class should use.
           </Text>
-          <View style={s.assignmentTarget}>
+          <View style={[s.assignmentTarget, s.nextSlotCard]}>
             <CalendarDays size={21} color={C.rose} />
             <View style={s.flex}>
               <Text style={s.moveTitle}>
@@ -1922,6 +2081,27 @@ function AssignPlan({
             Assign {plan.brief.program} / {plan.brief.week} / {plan.brief.day} to
             another scheduled class.
           </Text>
+          <Text style={s.group}>NEXT AVAILABLE SLOT</Text>
+          <View style={[s.assignmentTarget, s.nextSlotCard]}>
+            <CalendarDays size={21} color={C.rose} />
+            <View style={s.flex}>
+              <Text style={s.moveTitle}>
+                {classDateLabel(nextAvailable.date, true)} at {nextAvailable.time}
+              </Text>
+              <Text style={s.sub}>
+                {planLevel(plan)} / 45 min / based on device time
+              </Text>
+            </View>
+            <Pressable
+              onPress={scheduleNext}
+              style={s.assignCompact}
+              accessibilityRole="button"
+              accessibilityLabel={`Schedule next available class ${classDateLabel(nextAvailable.date, true)} at ${nextAvailable.time}`}
+            >
+              <CalendarDays size={13} color={C.white} />
+              <Text style={s.assignCompactText}>Schedule</Text>
+            </Pressable>
+          </View>
           <Text style={s.group}>UPCOMING CLASS SLOTS</Text>
           {futureSchedule.map((slot) => {
             const occupied = slot.planId === plan.id;
@@ -1954,8 +2134,11 @@ function AssignPlan({
           })}
           {!futureSchedule.length ? (
             <View style={s.emptyCard}>
-              <Text style={s.moveTitle}>No upcoming classes</Text>
-              <Text style={s.sub}>Add a class in My Schedule first.</Text>
+              <Text style={s.moveTitle}>No other upcoming classes</Text>
+              <Text style={s.sub}>
+                Use the next available slot above or choose a date in My Schedule.
+              </Text>
+              <Outline label="Open My Schedule" onPress={openSchedule} />
             </View>
           ) : null}
         </>
@@ -1968,12 +2151,14 @@ function ScheduleManager({
   initialEditId,
   back,
   save,
+  cancel,
   remove,
 }: {
   schedule: ScheduledClass[];
   initialEditId?: string;
   back: () => void;
   save: (slot: ScheduledClass) => void;
+  cancel: (slot: ScheduledClass) => void;
   remove: (id: string) => void;
 }) {
   const [date, setDate] = useState(dateKeyFromOffset(1));
@@ -1982,10 +2167,20 @@ function ScheduleManager({
   const [lesson, setLesson] = useState(PROGRAM_DAY_OPTIONS[0]);
   const [error, setError] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [now, setNow] = useState(() => new Date());
+  const [filter, setFilter] = useState<ScheduleFilter>("Upcoming");
+  const now = useLiveNow();
   const timeOptions = useMemo(
-    () => scheduleTimeOptions(date, now),
-    [date, now],
+    () =>
+      scheduleTimeOptions(date, now).filter(
+        (option) =>
+          !schedule.some(
+            (slot) =>
+              slot.id !== editingId &&
+              slot.status !== "CANCELLED" &&
+              scheduleSlotsOverlap({ date, time: option }, slot),
+          ),
+      ),
+    [date, editingId, now, schedule],
   );
   const markedDates = useMemo(
     () => ({
@@ -1996,6 +2191,10 @@ function ScheduleManager({
       },
     }),
     [date],
+  );
+  const visibleSchedule = useMemo(
+    () => filterSchedule(schedule, filter, now),
+    [filter, now, schedule],
   );
   const resetForm = () => {
     setEditingId(null);
@@ -2014,15 +2213,9 @@ function ScheduleManager({
     setError("");
   };
   useEffect(() => {
-    if (date !== localDateKey()) return;
-    setNow(new Date());
-    const timer = setInterval(() => setNow(new Date()), 30_000);
-    return () => clearInterval(timer);
-  }, [date]);
-  useEffect(() => {
     if (timeOptions.includes(time)) return;
     setTime(timeOptions[0] ?? "");
-  }, [date, now]);
+  }, [time, timeOptions]);
   useEffect(() => {
     const initialClass = schedule.find((slot) => slot.id === initialEditId);
     if (initialClass) edit(initialClass);
@@ -2048,42 +2241,69 @@ function ScheduleManager({
     if (
       schedule.some(
         (slot) =>
-          slot.id !== editingId && slot.date === date && slot.time === clean,
+          slot.id !== editingId &&
+          slot.status !== "CANCELLED" &&
+          scheduleSlotsOverlap({ date, time: clean }, slot),
       )
     ) {
-      setError("A class already exists at this date and time.");
+      setError("This 45-minute class overlaps another scheduled class.");
       return;
     }
     const existing = schedule.find((slot) => slot.id === editingId);
-    save({
-      id: editingId ?? `slot-${clean.replace(":", "")}-${Date.now()}`,
-      date,
-      time: clean,
-      level,
-      lesson: lesson.trim() || "New class",
-      status: existing?.status ?? "NEEDS PLAN",
-      planId: existing?.planId,
-    });
+    save(
+      existing
+        ? rescheduleSlot(
+            {
+              ...existing,
+              level,
+              lesson: lesson.trim() || "New class",
+            },
+            date,
+            clean,
+          )
+        : {
+            id: `slot-${clean.replace(":", "")}-${Date.now()}`,
+            date,
+            time: clean,
+            level,
+            lesson: lesson.trim() || "New class",
+            status: "NEEDS PLAN",
+          },
+    );
     resetForm();
   };
-  const confirmRemove = (slot: ScheduledClass) =>
+  const confirmRemove = (slot: ScheduledClass) => {
+    if (slot.status === "CANCELLED") {
+      confirmAction({
+        title: "Delete cancelled class?",
+        message: `${classDateLabel(slot.date, true)} at ${slot.time} will be permanently removed.`,
+        confirmText: "Delete",
+        cancelText: "Keep",
+        destructive: true,
+        onConfirm: () => remove(slot.id),
+      });
+      return;
+    }
     confirmAction({
-      title: "Remove class?",
-      message: `${classDateLabel(slot.date, true)} at ${slot.time} will be removed from the schedule.`,
-      confirmText: "Remove",
-      cancelText: "Keep",
+      title: "Cancel class?",
+      message: `${classDateLabel(slot.date, true)} at ${slot.time} will move to Cancelled. Its assigned plan will remain saved.`,
+      confirmText: "Cancel Class",
+      cancelText: "Keep Class",
       destructive: true,
-      onConfirm: () => remove(slot.id),
+      onConfirm: () => cancel(slot),
     });
+  };
   const listHeader = (
     <View style={s.scheduleHeader}>
       <Header title="My Schedule" back={back} />
       <View style={s.profileEditor}>
         <View style={s.row}>
-          <Text style={s.group}>{editingId ? "EDIT CLASS" : "ADD CLASS"}</Text>
+          <Text style={s.group}>
+            {editingId ? "RESCHEDULE CLASS" : "ADD CLASS"}
+          </Text>
           {editingId ? (
             <Pressable onPress={resetForm} hitSlop={10}>
-              <Text style={s.link}>Cancel edit</Text>
+              <Text style={s.link}>Cancel reschedule</Text>
             </Pressable>
           ) : null}
         </View>
@@ -2143,16 +2363,35 @@ function ScheduleManager({
         />
         {error ? <Text style={s.formError}>{error}</Text> : null}
         <Main
-          label={editingId ? "Save Changes" : "Add to Schedule"}
+          label={editingId ? "Save New Time" : "Add to Schedule"}
           onPress={submit}
         />
       </View>
-      <Text style={s.group}>{schedule.length} CLASSES</Text>
+      <Text style={s.group}>{visibleSchedule.length} CLASSES</Text>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={s.filterRow}
+      >
+        {(
+          [
+            "Upcoming",
+            "Completed",
+            "Needs plan",
+            "Drafts",
+            "Cancelled",
+          ] as ScheduleFilter[]
+        ).map((option) => (
+          <Pressable key={option} onPress={() => setFilter(option)}>
+            <Pill label={option} active={filter === option} />
+          </Pressable>
+        ))}
+      </ScrollView>
     </View>
   );
   return (
     <FlatList
-      data={schedule}
+      data={visibleSchedule}
       keyExtractor={(slot) => slot.id}
       contentContainerStyle={s.page}
       keyboardShouldPersistTaps="handled"
@@ -2161,7 +2400,12 @@ function ScheduleManager({
       windowSize={7}
       ListHeaderComponent={listHeader}
       renderItem={({ item: slot }) => (
-        <View style={s.assignCard}>
+        <View
+          style={[
+            s.assignCard,
+            slot.status === "CANCELLED" && s.cancelledClassCard,
+          ]}
+        >
           <View style={s.time}>
             <Text style={s.timeText}>{slot.time}</Text>
             <Text style={s.duration}>45 min</Text>
@@ -2171,28 +2415,45 @@ function ScheduleManager({
             <Text style={s.sub}>{slot.lesson}</Text>
             <Text style={s.duration}>{classDateLabel(slot.date, true)}</Text>
           </View>
-          <Pill
-            label={slot.planId ? "READY" : slot.status}
-            active
-            green={Boolean(slot.planId)}
-          />
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Edit ${slot.level} class`}
-            onPress={() => edit(slot)}
-            hitSlop={10}
-          >
-            <Pencil size={18} color={C.muted} />
-          </Pressable>
-          <Pressable onPress={() => confirmRemove(slot)} hitSlop={10}>
-            <X size={18} color={C.rose} />
-          </Pressable>
+          <View style={s.scheduleTools}>
+            <Pill
+              label={slot.status.replace("_", " ")}
+              active
+              green={slot.status === "READY" || slot.status === "COMPLETED"}
+            />
+            {slot.status !== "CANCELLED" ? (
+              <>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Add ${slot.level} class to calendar`}
+                onPress={() => addClassToCalendar(slot)}
+                hitSlop={10}
+              >
+                <CalendarPlus size={18} color={C.rose} />
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Reschedule ${slot.level} class`}
+                onPress={() => edit(slot)}
+                hitSlop={10}
+              >
+                <CalendarDays size={18} color={C.muted} />
+              </Pressable>
+              </>
+            ) : null}
+            <Pressable onPress={() => confirmRemove(slot)} hitSlop={10}>
+              {slot.status === "CANCELLED" ? (
+                <Trash2 size={18} color="#A34848" />
+              ) : (
+                <X size={18} color={C.rose} />
+              )}
+            </Pressable>
+          </View>
         </View>
       )}
       ListEmptyComponent={
         <View style={s.emptyCard}>
-          <Text style={s.moveTitle}>No classes scheduled</Text>
-          <Text style={s.sub}>Add your first class using the form above.</Text>
+          <Text style={s.sub}>No {filter.toLowerCase()} classes.</Text>
         </View>
       }
     />
@@ -2505,20 +2766,35 @@ function Create({
 function Generated({
   plan,
   library,
+  schedule,
   back,
   edit,
   save,
+  schedulePlan,
   teach,
 }: {
   plan: ClassPlan;
   library: LibraryMovement[];
+  schedule: ScheduledClass[];
   back: () => void;
   edit: () => void;
   save: () => void;
+  schedulePlan: () => void;
   teach: () => void;
 }) {
+  const now = useLiveNow();
   const readiness = classReadiness(plan, library);
   const valid = readiness.ready;
+  const nextClass = schedule
+    .filter(
+      (slot) =>
+        slot.planId === plan.id &&
+        slot.status !== "CANCELLED" &&
+        slot.status !== "COMPLETED" &&
+        isFutureScheduleSlot(slot, now),
+    )
+    .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`))[0];
+  const nextAvailable = nextAvailableClassSlot(schedule, now);
   const start = () => {
     if (!valid) {
       Alert.alert(
@@ -2554,7 +2830,13 @@ function Generated({
         <Text style={s.planSub}>
           {plan.brief.program} · {plan.brief.week} · {plan.brief.day}
         </Text>
-        {plan.brief.scheduledDate && plan.brief.scheduledTime ? (
+        {plan.status === "saved" ? (
+          <Text style={s.sub}>
+            {nextClass
+              ? `Scheduled: ${classDateLabel(nextClass.date, true)} at ${nextClass.time}`
+              : `Next available: ${classDateLabel(nextAvailable.date, true)} at ${nextAvailable.time}`}
+          </Text>
+        ) : plan.brief.scheduledDate && plan.brief.scheduledTime ? (
           <Text style={s.sub}>
             {classDateLabel(plan.brief.scheduledDate, true)} at{" "}
             {plan.brief.scheduledTime}
@@ -2620,14 +2902,14 @@ function Generated({
           <Main
             label={
               plan.status === "saved"
-                ? plan.brief.scheduledDate
-                  ? "Scheduled"
-                  : "Plan Saved"
+                ? nextClass
+                  ? "Schedule Another"
+                  : "Schedule Class"
                 : plan.brief.scheduledDate
                   ? "Save & Schedule"
                   : "Save Plan"
             }
-            onPress={save}
+            onPress={plan.status === "saved" ? schedulePlan : save}
           />
         </View>
       </View>
@@ -2933,7 +3215,7 @@ function Classes({
             </Pressable>
             <Pressable onPress={() => remove(index)} hitSlop={7}
               accessibilityRole="button" accessibilityLabel={`Remove ${movementLabel(movement)}`}>
-              <X size={17} color={C.rose} />
+              <Trash2 size={17} color={C.rose} />
             </Pressable>
           </View>
         </View>
@@ -3056,27 +3338,34 @@ function Plans({
   plan,
   hasActiveDraft,
   savedPlans,
+  schedule,
   lastSession,
   create,
   open,
   duplicate,
   removeDraft,
   select,
+  deletedCount,
+  openDeleted,
 }: {
   plan: ClassPlan;
   hasActiveDraft: boolean;
   savedPlans: ClassPlan[];
+  schedule: ScheduledClass[];
   lastSession: SessionResult | null;
   create: () => void;
   open: () => void;
   duplicate: () => void;
   removeDraft: () => void;
   select: (plan: ClassPlan) => void;
+  deletedCount: number;
+  openDeleted: () => void;
 }) {
+  const now = useLiveNow();
   const confirmDeleteDraft = () =>
     confirmAction({
       title: "Delete draft?",
-      message: `${plan.brief.program} will be permanently discarded. Saved plans and assigned classes will stay unchanged.`,
+      message: `${plan.brief.program} will move to Recently Deleted for 30 days. Saved plans will stay unchanged.`,
       confirmText: "Delete Draft",
       cancelText: "Keep Draft",
       destructive: true,
@@ -3086,6 +3375,29 @@ function Plans({
     plan.status === "saved"
       ? [plan, ...savedPlans.filter((saved) => saved.id !== plan.id)]
       : savedPlans;
+  const upcomingSchedule = useMemo(
+    () => schedule
+      .filter(
+        (slot) =>
+          slot.status !== "CANCELLED" &&
+          slot.status !== "COMPLETED" &&
+          isFutureScheduleSlot(slot, now),
+      )
+      .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`)),
+    [now, schedule],
+  );
+  const nextAvailable = useMemo(
+    () => nextAvailableClassSlot(schedule, now),
+    [now, schedule],
+  );
+  const nextClassForPlan = (planId: string) =>
+    upcomingSchedule.find((slot) => slot.planId === planId);
+  const scheduleLabelForPlan = (planId: string) => {
+    const nextClass = nextClassForPlan(planId);
+    return nextClass
+      ? `Next class: ${classDateLabel(nextClass.date, true)} at ${nextClass.time}`
+      : `Next available: ${classDateLabel(nextAvailable.date, true)} at ${nextAvailable.time}`;
+  };
   return (
     <ScrollView contentContainerStyle={s.page}>
       <View style={s.row}>
@@ -3093,9 +3405,24 @@ function Plans({
           <Text style={s.headerTitle}>Plans</Text>
           <Text style={s.sub}>Prepare and reuse reviewed lessons.</Text>
         </View>
-        <Pressable onPress={create} style={s.avatar}>
-          <Plus size={22} color={C.rose} />
-        </Pressable>
+        <View style={s.headerActions}>
+          <Pressable
+            onPress={openDeleted}
+            style={s.avatar}
+            accessibilityRole="button"
+            accessibilityLabel={`Recently deleted, ${deletedCount} items`}
+          >
+            <Trash2 size={19} color={C.rose} />
+            {deletedCount ? (
+              <View style={s.deletedCountBadge}>
+                <Text style={s.deletedCountText}>{deletedCount}</Text>
+              </View>
+            ) : null}
+          </Pressable>
+          <Pressable onPress={create} style={s.avatar}>
+            <Plus size={22} color={C.rose} />
+          </Pressable>
+        </View>
       </View>
       {hasActiveDraft && plan.status === "draft" ? (
         <>
@@ -3155,12 +3482,9 @@ function Plans({
               <Text style={s.sub}>
                 {saved.brief.week} · {saved.brief.day} · v{saved.version}
               </Text>
-              {saved.brief.scheduledDate && saved.brief.scheduledTime ? (
-                <Text style={s.duration}>
-                  {classDateLabel(saved.brief.scheduledDate, true)} at{" "}
-                  {saved.brief.scheduledTime}
-                </Text>
-              ) : null}
+              <Text style={s.duration}>
+                {scheduleLabelForPlan(saved.id)}
+              </Text>
             </View>
             <View style={s.savedPlanRight}>
               <Text style={s.duration}>{fmt(planTotal(saved))}</Text>
@@ -3219,6 +3543,115 @@ function Plans({
     </ScrollView>
   );
 }
+function RecentlyDeleted({
+  items,
+  notice,
+  back,
+  restore,
+  remove,
+}: {
+  items: RecentlyDeletedItem[];
+  notice: string;
+  back: () => void;
+  restore: (item: RecentlyDeletedItem) => void;
+  remove: (id: string) => void;
+}) {
+  const now = useLiveNow().getTime();
+  const visible = useMemo(
+    () =>
+      pruneRecentlyDeleted(items, now).sort(
+        (first, second) => second.deletedAt - first.deletedAt,
+      ),
+    [items, now],
+  );
+  const itemName = (item: RecentlyDeletedItem) =>
+    item.kind === "movement" ? item.movement.name : item.plan.brief.program;
+  const itemKind = (item: RecentlyDeletedItem) =>
+    item.kind === "movement"
+      ? "MOVEMENT"
+      : item.kind === "draft"
+        ? "CLASS DRAFT"
+        : "SAVED PLAN";
+  const confirmPermanentDelete = (item: RecentlyDeletedItem) =>
+    confirmAction({
+      title: "Delete permanently?",
+      message: `${itemName(item)} cannot be restored after this.`,
+      confirmText: "Delete Forever",
+      cancelText: "Keep",
+      destructive: true,
+      onConfirm: () => remove(item.id),
+    });
+
+  return (
+    <ScrollView contentContainerStyle={s.page}>
+      <Header title="Recently Deleted" back={back} />
+      <Text style={s.sub}>Items are kept for 30 days before permanent removal.</Text>
+      {notice ? (
+        <Text accessibilityLiveRegion="polite" style={s.sequenceNotice}>
+          {notice}
+        </Text>
+      ) : null}
+      <Text style={s.group}>{visible.length} ITEMS</Text>
+      {visible.map((item) => {
+        const remaining = recentlyDeletedDaysRemaining(item.deletedAt, now);
+        return (
+          <View key={item.id} style={s.deletedItemCard}>
+            <View style={s.row}>
+              {item.kind === "movement" ? (
+                <View style={s.deletedMovementImage}>
+                  <MovementVisual
+                    movement={item.movement}
+                    style={s.deletedMovementImage}
+                    label={`${item.movement.name} deleted movement preview`}
+                  />
+                </View>
+              ) : (
+                <View style={s.deletedPlanIcon}>
+                  <List size={21} color={C.rose} />
+                </View>
+              )}
+              <View style={s.flex}>
+                <Text style={s.label}>{itemKind(item)}</Text>
+                <Text style={s.moveTitle}>{itemName(item)}</Text>
+                <Text style={s.sub}>
+                  Deleted {new Date(item.deletedAt).toLocaleDateString("en-ZA", {
+                    day: "numeric",
+                    month: "short",
+                  })} / {remaining} {remaining === 1 ? "day" : "days"} left
+                </Text>
+              </View>
+            </View>
+            <View style={s.deletedItemActions}>
+              <Pressable
+                onPress={() => restore(item)}
+                style={s.restoreAction}
+                accessibilityRole="button"
+                accessibilityLabel={`Restore ${itemName(item)}`}
+              >
+                <Undo2 size={16} color={C.white} />
+                <Text style={s.restoreActionText}>Restore</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => confirmPermanentDelete(item)}
+                style={s.deleteForeverAction}
+                accessibilityRole="button"
+                accessibilityLabel={`Permanently delete ${itemName(item)}`}
+              >
+                <Trash2 size={17} color="#A34848" />
+              </Pressable>
+            </View>
+          </View>
+        );
+      })}
+      {!visible.length ? (
+        <View style={s.emptyCard}>
+          <Text style={s.moveTitle}>Nothing recently deleted</Text>
+          <Text style={s.sub}>Deleted movements, drafts and plans will appear here.</Text>
+        </View>
+      ) : null}
+    </ScrollView>
+  );
+}
 function Details({
   movement,
   plan,
@@ -3229,6 +3662,7 @@ function Details({
   toggle,
   add,
   review,
+  remove,
 }: {
   movement: LibraryMovement;
   plan: ClassPlan;
@@ -3239,11 +3673,21 @@ function Details({
   toggle: () => void;
   add: (phase: Phase, side: SideSelection) => void;
   review: () => void;
+  remove: () => void;
 }) {
   const [phase, setPhase] = useState<Phase>(initialPhase ?? movement.phases?.[0] ?? "Main");
   const [side, setSide] = useState<SideSelection>("both");
   const remaining = phaseRemaining(plan, phase);
   const duration = selectionDuration(movement, side);
+  const confirmDeleteMovement = () =>
+    confirmAction({
+      title: "Delete movement?",
+      message: `${movement.name} will move to Recently Deleted for 30 days. Existing class plans will keep their saved copy.`,
+      confirmText: "Delete Movement",
+      cancelText: "Keep Movement",
+      destructive: true,
+      onConfirm: remove,
+    });
   return (
     <View style={s.flex}>
       <ScrollView contentContainerStyle={s.page}>
@@ -3330,6 +3774,17 @@ function Details({
           onPress={() => movement.reviewStatus === "needs-review" || !planning
             ? review() : add(phase, side)}
         />
+        {!planning ? (
+          <Pressable
+            onPress={confirmDeleteMovement}
+            style={[s.dangerAction, s.detailDeleteAction]}
+            accessibilityRole="button"
+            accessibilityLabel={`Delete ${movement.name} from movement library`}
+          >
+            <Trash2 size={17} color="#A34848" />
+            <Text style={s.dangerText}>Delete from Library</Text>
+          </Pressable>
+        ) : null}
       </View>
     </View>
   );
@@ -3534,6 +3989,8 @@ function Library({
   create,
   toggle,
   back,
+  deletedCount,
+  openDeleted,
 }: {
   movements: LibraryMovement[];
   favourites: string[];
@@ -3542,6 +3999,8 @@ function Library({
   create: () => void;
   toggle: (id: string) => void;
   back?: () => void;
+  deletedCount: number;
+  openDeleted: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("All");
@@ -3573,9 +4032,24 @@ function Library({
           <ArrowLeft size={22} color={C.ink} />
         </Pressable> : null}
         <Text style={s.headerTitle}>Movement Library</Text>
-        <Pressable onPress={create} style={s.avatar}>
-          <Plus size={23} color={C.rose} />
-        </Pressable>
+        <View style={s.headerActions}>
+          <Pressable
+            onPress={openDeleted}
+            style={s.avatar}
+            accessibilityRole="button"
+            accessibilityLabel={`Recently deleted, ${deletedCount} items`}
+          >
+            <Trash2 size={19} color={C.rose} />
+            {deletedCount ? (
+              <View style={s.deletedCountBadge}>
+                <Text style={s.deletedCountText}>{deletedCount}</Text>
+              </View>
+            ) : null}
+          </Pressable>
+          <Pressable onPress={create} style={s.avatar}>
+            <Plus size={23} color={C.rose} />
+          </Pressable>
+        </View>
       </View>
       <View style={s.search}>
         <Search size={20} color={C.muted} />
@@ -3893,9 +4367,13 @@ function Insights({
           100,
       )
     : 0;
-  const readyRate = schedule.length
+  const activeSchedule = schedule.filter(
+    (slot) => slot.status !== "CANCELLED",
+  );
+  const readyRate = activeSchedule.length
     ? Math.round(
-        (schedule.filter((slot) => slot.planId).length / schedule.length) * 100,
+        (activeSchedule.filter((slot) => slot.planId).length /
+          activeSchedule.length) * 100,
       )
     : 0;
   return (
@@ -4049,7 +4527,9 @@ function Profile({
     setError("");
     setEditing(false);
   };
-  const toggle = (key: "vibration" | "countdownSound" | "offline") =>
+  const toggle = (
+    key: "vibration" | "countdownSound" | "completionSound" | "offline",
+  ) =>
     updatePreferences({ ...preferences, [key]: !preferences[key] });
   const Toggle = ({
     value,
@@ -4181,6 +4661,16 @@ function Profile({
             <Toggle
               value={preferences.countdownSound}
               onPress={() => toggle("countdownSound")}
+            />
+          </View>
+          <View style={s.setting}>
+            <View style={s.flex}>
+              <Text style={s.settingText}>Class completion sound</Text>
+              <Text style={s.duration}>Final chime after the last movement</Text>
+            </View>
+            <Toggle
+              value={preferences.completionSound}
+              onPress={() => toggle("completionSound")}
             />
           </View>
           <View style={s.setting}>
@@ -4425,6 +4915,7 @@ function DataSettings({
 
 function ManagePlan({
   plan,
+  schedule,
   back,
   open,
   duplicate,
@@ -4433,6 +4924,7 @@ function ManagePlan({
   remove,
 }: {
   plan: ClassPlan;
+  schedule: ScheduledClass[];
   back: () => void;
   open: () => void;
   duplicate: () => void;
@@ -4440,9 +4932,20 @@ function ManagePlan({
   rename: (name: string) => void;
   remove: () => void;
 }) {
+  const now = useLiveNow();
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(plan.brief.program);
   const [error, setError] = useState("");
+  const nextClass = schedule
+    .filter(
+      (slot) =>
+        slot.planId === plan.id &&
+        slot.status !== "CANCELLED" &&
+        slot.status !== "COMPLETED" &&
+        isFutureScheduleSlot(slot, now),
+    )
+    .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`))[0];
+  const nextAvailable = nextAvailableClassSlot(schedule, now);
   const saveName = () => {
     if (!name.trim()) {
       setError("Enter a plan name.");
@@ -4455,7 +4958,7 @@ function ManagePlan({
   const confirmDelete = () =>
     confirmAction({
       title: "Delete saved plan?",
-      message: `${plan.brief.program} will be removed. Assigned classes will need another plan.`,
+      message: `${plan.brief.program} will move to Recently Deleted for 30 days. Assigned classes will need another plan until it is restored.`,
       confirmText: "Delete",
       cancelText: "Keep plan",
       destructive: true,
@@ -4543,8 +5046,14 @@ function ManagePlan({
         <Pressable onPress={assign} style={s.manageAction}>
           <CalendarDays size={21} color={C.rose} />
           <View style={s.flex}>
-            <Text style={s.settingText}>Assign to class</Text>
-            <Text style={s.sub}>Use this plan in your schedule</Text>
+            <Text style={s.settingText}>
+              {nextClass ? "Use for another class" : "Schedule class"}
+            </Text>
+            <Text style={s.sub}>
+              {nextClass
+                ? `Next: ${classDateLabel(nextClass.date, true)} at ${nextClass.time}`
+                : `Next available: ${classDateLabel(nextAvailable.date, true)} at ${nextAvailable.time}`}
+            </Text>
           </View>
           <ChevronRight size={19} color={C.muted} />
         </Pressable>
@@ -4589,7 +5098,11 @@ function TeachingSession({
   const countdownPlayer = useAudioPlayer(
     require("./assets/countdown-beep.wav"),
   );
+  const completionPlayer = useAudioPlayer(
+    require("./assets/class-complete.wav"),
+  );
   const lastCountdownCue = useRef("");
+  const endingRef = useRef(false);
   const indexRef = useRef(restored.movementIndex);
   const moveTimeRef = useRef(restored.remainingSeconds);
   const lastTickAt = useRef(Date.now());
@@ -4657,10 +5170,12 @@ function TeachingSession({
       });
     });
   };
-  const end = () => {
+  const end = (completed: boolean) => {
+    if (endingRef.current) return;
+    endingRef.current = true;
     if (preferences.vibration)
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    finish({
+    const result: SessionResult = {
       startedAt,
       endedAt: Date.now(),
       completed: index + 1,
@@ -4670,7 +5185,17 @@ function TeachingSession({
       planId: plan.id,
       program: plan.brief.program,
       scheduledClassId: session.scheduledClassId,
-    });
+    };
+    if (!completed || !preferences.completionSound) {
+      finish(result);
+      return;
+    }
+    setHeld(true);
+    void completionPlayer
+      .seekTo(0)
+      .then(() => completionPlayer.play())
+      .catch(() => undefined);
+    setTimeout(() => finish(result), 800);
   };
   const confirmEnd = () => {
     const completed = index === movements.length - 1;
@@ -4680,7 +5205,7 @@ function TeachingSession({
       : "The unfinished movements will be recorded in the summary.";
 
     if (Platform.OS === "web") {
-      if (globalThis.confirm(`${title}\n\n${message}`)) end();
+      if (globalThis.confirm(`${title}\n\n${message}`)) end(completed);
       return;
     }
 
@@ -4689,7 +5214,7 @@ function TeachingSession({
       {
         text: completed ? "Complete" : "End early",
         style: "destructive",
-        onPress: end,
+        onPress: () => end(completed),
       },
     ]);
   };
@@ -4984,12 +5509,24 @@ function BlushBodiesApp() {
     ActiveTeachingSession | undefined
   >();
   const [schedule, setSchedule] = useState<ScheduledClass[]>(initialSchedule);
+  const [homeDate, setHomeDate] = useState(localDateKey());
   const [scheduleEditId, setScheduleEditId] = useState<string | undefined>();
+  const [scheduleReturnScreen, setScheduleReturnScreen] = useState<
+    "profile" | "home" | "assign"
+  >("profile");
   const [assignmentSlotId, setAssignmentSlotId] = useState<
     string | undefined
   >();
   const [libraryMovements, setLibraryMovements] =
     useState<LibraryMovement[]>(initialLibrary);
+  const [deletedMovementIds, setDeletedMovementIds] = useState<string[]>([]);
+  const [recentlyDeleted, setRecentlyDeleted] = useState<RecentlyDeletedItem[]>([]);
+  const [recentlyDeletedReturn, setRecentlyDeletedReturn] = useState<
+    "classes" | "library"
+  >("classes");
+  const [recentlyDeletedNotice, setRecentlyDeletedNotice] = useState("");
+  const [pendingUndo, setPendingUndo] = useState<PendingUndo | null>(null);
+  const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [favourites, setFavourites] = useState<string[]>([
     "side-leg-lift",
     "clamshell",
@@ -5003,11 +5540,18 @@ function BlushBodiesApp() {
       teachingMode: "Guided",
       vibration: true,
       countdownSound: false,
+      completionSound: true,
       offline: false,
     });
   const [signedIn, setSignedIn] = useState(false);
   const [resetEmail, setResetEmail] = useState("");
   const backgroundedAt = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (undoTimer.current) clearTimeout(undoTimer.current);
+    },
+    [],
+  );
   useEffect(() => {
     void AsyncStorage.removeItem(LEGACY_STORAGE_KEY).catch(() => undefined);
   }, []);
@@ -5021,6 +5565,8 @@ function BlushBodiesApp() {
       sessionHistory,
       schedule,
       libraryMovements,
+      deletedMovementIds,
+      recentlyDeleted: pruneRecentlyDeleted(recentlyDeleted),
       favourites,
       instructorPreferences,
       activeTeachingSession,
@@ -5038,6 +5584,8 @@ function BlushBodiesApp() {
     sessionHistory,
     schedule,
     libraryMovements,
+    deletedMovementIds,
+    recentlyDeleted,
     favourites,
     instructorPreferences,
     activeTeachingSession,
@@ -5100,7 +5648,10 @@ function BlushBodiesApp() {
       const scheduledTime = saved.brief.scheduledTime;
       setSchedule((current) => {
         const matching = current.find(
-          (slot) => slot.date === scheduledDate && slot.time === scheduledTime,
+          (slot) =>
+            slot.date === scheduledDate &&
+            slot.time === scheduledTime &&
+            slot.status !== "CANCELLED",
         );
         const scheduled: ScheduledClass = {
           id:
@@ -5153,10 +5704,51 @@ function BlushBodiesApp() {
       ),
     );
   };
+  const deletedItemSourceKey = (item: RecentlyDeletedItem) =>
+    item.kind === "movement"
+      ? `${item.kind}:${item.movement.id}`
+      : `${item.kind}:${item.plan.id}`;
+  const keepRecentlyDeleted = (item: RecentlyDeletedItem) => {
+    const sourceKey = deletedItemSourceKey(item);
+    setRecentlyDeleted((current) => [
+      item,
+      ...pruneRecentlyDeleted(current).filter(
+        (candidate) => deletedItemSourceKey(candidate) !== sourceKey,
+      ),
+    ]);
+  };
+  const showUndo = (undo: PendingUndo) => {
+    if (undoTimer.current) clearTimeout(undoTimer.current);
+    setPendingUndo(undo);
+    undoTimer.current = setTimeout(() => {
+      setPendingUndo(null);
+      undoTimer.current = null;
+    }, 6000);
+  };
+  const dismissUndo = () => {
+    if (undoTimer.current) clearTimeout(undoTimer.current);
+    undoTimer.current = null;
+    setPendingUndo(null);
+  };
   const deletePlan = () => {
     setSequenceHistory([]);
     setSequenceNotice("");
     const deletedId = plan.id;
+    const deletedItem: RecentlyDeletedItem = {
+      id: `deleted-plan-${deletedId}-${Date.now()}`,
+      kind: "plan",
+      deletedAt: Date.now(),
+      plan,
+      assignments: schedule
+        .filter((slot) => slot.planId === deletedId)
+        .map((slot) => ({ id: slot.id, status: slot.status })),
+    };
+    keepRecentlyDeleted(deletedItem);
+    showUndo({
+      kind: "deleted",
+      message: `${plan.brief.program} deleted.`,
+      item: deletedItem,
+    });
     const remainingPlans = savedPlans.filter((saved) => saved.id !== deletedId);
     setSavedPlans(remainingPlans);
     setSchedule((current) =>
@@ -5177,6 +5769,26 @@ function BlushBodiesApp() {
     setSequenceHistory([]);
     setSequenceNotice("");
     setLibraryPlanPhase(undefined);
+    const deletedItem: RecentlyDeletedItem = {
+      id: `deleted-draft-${plan.id}-${Date.now()}`,
+      kind: "draft",
+      deletedAt: Date.now(),
+      plan,
+      assignments: schedule
+        .filter(
+          (slot) =>
+            slot.status === "DRAFT" &&
+            slot.date === draftDate &&
+            slot.time === draftTime,
+        )
+        .map((slot) => ({ id: slot.id, status: slot.status })),
+    };
+    keepRecentlyDeleted(deletedItem);
+    showUndo({
+      kind: "deleted",
+      message: `${plan.brief.program} draft deleted.`,
+      item: deletedItem,
+    });
     setHasActiveDraft(false);
     if (draftDate && draftTime) {
       setSchedule((current) =>
@@ -5193,6 +5805,7 @@ function BlushBodiesApp() {
     setScreen("classes");
   };
   const assignPlan = (slotId: string, planId: string) => {
+    const targetSlot = schedule.find((slot) => slot.id === slotId);
     const selectedPlan =
       savedPlans.find((saved) => saved.id === planId) ??
       (plan.id === planId && plan.status === "saved" ? plan : undefined);
@@ -5207,6 +5820,30 @@ function BlushBodiesApp() {
       ),
     );
     setPlan(selectedPlan);
+    if (targetSlot) setHomeDate(targetSlot.date);
+    setHasActiveDraft(false);
+    setAssignmentSlotId(undefined);
+    setScreen("home");
+  };
+  const schedulePlanAt = () => {
+    if (plan.status !== "saved" || !classReadiness(plan, libraryMovements).ready)
+      return;
+    const { date, time } = nextAvailableClassSlot(schedule, new Date());
+    const slot: ScheduledClass = {
+      id: `slot-${date}-${time.replace(":", "")}-${Date.now()}`,
+      date,
+      time,
+      level: planLevel(plan),
+      lesson: `${plan.brief.week} · ${plan.brief.day}`,
+      status: "READY",
+      planId: plan.id,
+    };
+    setSchedule((current) =>
+      [...current, slot].sort((a, b) =>
+        `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`),
+      ),
+    );
+    setHomeDate(date);
     setHasActiveDraft(false);
     setAssignmentSlotId(undefined);
     setScreen("home");
@@ -5351,6 +5988,7 @@ function BlushBodiesApp() {
   const saveCustomMovement = (movement: LibraryMovement) => {
     const reviewed = { ...movement, reviewedBy: account.name, reviewedAt: Date.now() };
     setLibraryMovements((current) => [reviewed, ...current.filter((item) => item.id !== movement.id)]);
+    setDeletedMovementIds((current) => current.filter((id) => id !== movement.id));
     setPlan((current) => syncMovementImage(current, movement.id, movement.imageUri));
     setSavedPlans((current) => current.map((saved) =>
       syncMovementImage(saved, movement.id, movement.imageUri)));
@@ -5362,6 +6000,138 @@ function BlushBodiesApp() {
     setMovementToReview(undefined);
     setLibraryNotice(`${movement.name} saved to the library.`);
     setScreen(libraryPlanPhase ? "details" : "library");
+  };
+  const deleteLibraryMovement = (movement: LibraryMovement) => {
+    const deletedItem: RecentlyDeletedItem = {
+      id: `deleted-movement-${movement.id}-${Date.now()}`,
+      kind: "movement",
+      deletedAt: Date.now(),
+      movement,
+    };
+    keepRecentlyDeleted(deletedItem);
+    showUndo({
+      kind: "deleted",
+      message: `${movement.name} deleted.`,
+      item: deletedItem,
+    });
+    setLibraryMovements((current) => current.filter((item) => item.id !== movement.id));
+    setDeletedMovementIds((current) =>
+      current.includes(movement.id) ? current : [...current, movement.id],
+    );
+    setFavourites((current) => current.filter((id) => id !== movement.id));
+    setMovementToReview(undefined);
+    setSelectedMovement(
+      libraryMovements.find((item) => item.id !== movement.id) ?? initialLibrary[0],
+    );
+    setLibraryNotice(
+      `${movement.name} moved to Recently Deleted. Existing class plans were not changed.`,
+    );
+    setScreen("library");
+  };
+  const removeRecentlyDeletedItem = (id: string) =>
+    setRecentlyDeleted((current) => current.filter((item) => item.id !== id));
+  const restoreDeletedItem = (item: RecentlyDeletedItem) => {
+    const restore = () => {
+      if (item.kind === "movement") {
+        setLibraryMovements((current) => [
+          item.movement,
+          ...current.filter((movement) => movement.id !== item.movement.id),
+        ]);
+        setDeletedMovementIds((current) =>
+          current.filter((id) => id !== item.movement.id),
+        );
+        setSelectedMovement(item.movement);
+        setLibraryNotice(`${item.movement.name} restored to the library.`);
+        setRecentlyDeletedNotice(`${item.movement.name} restored.`);
+      } else if (item.kind === "draft") {
+        setPlan({ ...item.plan, status: "draft" });
+        setHasActiveDraft(true);
+        setSchedule((current) =>
+          restoreScheduleAssignments(current, item.assignments),
+        );
+        setRecentlyDeletedNotice(`${item.plan.brief.program} draft restored.`);
+      } else {
+        const restoredPlan = { ...item.plan, status: "saved" as const };
+        setSavedPlans((current) => [
+          restoredPlan,
+          ...current.filter((saved) => saved.id !== restoredPlan.id),
+        ]);
+        if (!hasActiveDraft || plan.status !== "draft") {
+          setPlan(restoredPlan);
+          setHasActiveDraft(false);
+        }
+        setSchedule((current) =>
+          restoreScheduleAssignments(
+            current,
+            item.assignments,
+            restoredPlan.id,
+          ),
+        );
+        setRecentlyDeletedNotice(`${restoredPlan.brief.program} restored.`);
+      }
+      removeRecentlyDeletedItem(item.id);
+    };
+
+    if (
+      item.kind === "draft" &&
+      hasActiveDraft &&
+      plan.status === "draft" &&
+      plan.id !== item.plan.id
+    ) {
+      confirmAction({
+        title: "Replace current draft?",
+        message: `Restoring ${item.plan.brief.program} will move the current draft to Recently Deleted.`,
+        confirmText: "Restore Draft",
+        cancelText: "Keep Current",
+        onConfirm: () => {
+          keepRecentlyDeleted({
+            id: `deleted-draft-${plan.id}-${Date.now()}`,
+            kind: "draft",
+            deletedAt: Date.now(),
+            plan,
+            assignments: schedule
+              .filter(
+                (slot) =>
+                  slot.status === "DRAFT" &&
+                  slot.date === plan.brief.scheduledDate &&
+                  slot.time === plan.brief.scheduledTime,
+              )
+              .map((slot) => ({ id: slot.id, status: slot.status })),
+          });
+          restore();
+        },
+      });
+      return;
+    }
+    restore();
+  };
+  const cancelScheduledClass = (scheduledClass: ScheduledClass) => {
+    setSchedule((current) =>
+      current.map((slot) =>
+        slot.id === scheduledClass.id
+          ? { ...slot, status: "CANCELLED" }
+          : slot,
+      ),
+    );
+    showUndo({
+      kind: "cancelled",
+      message: `${scheduledClass.level} class cancelled.`,
+      scheduledClass,
+    });
+  };
+  const undoPendingDeletion = () => {
+    const undo = pendingUndo;
+    dismissUndo();
+    if (!undo) return;
+    if (undo.kind === "deleted") {
+      restoreDeletedItem(undo.item);
+      return;
+    }
+    setSchedule((current) =>
+      current.map((slot) =>
+        slot.id === undo.scheduledClass.id ? undo.scheduledClass : slot,
+      ),
+    );
   };
   const createDefaultPlan = () =>
     createPlan({
@@ -5385,14 +6155,19 @@ function BlushBodiesApp() {
     setSessionHistory([]);
     setActiveTeachingSession(undefined);
     setSchedule(initialSchedule);
+    setHomeDate(localDateKey());
     setAssignmentSlotId(undefined);
     setLibraryMovements(initialLibrary);
+    setDeletedMovementIds([]);
+    setRecentlyDeleted([]);
+    setRecentlyDeletedNotice("");
     setFavourites(["side-leg-lift", "clamshell"]);
     setSelectedMovement(initialLibrary[0]);
     setInstructorPreferences({
       teachingMode: "Guided",
       vibration: true,
       countdownSound: false,
+      completionSound: true,
       offline: false,
     });
   };
@@ -5401,6 +6176,7 @@ function BlushBodiesApp() {
     setSequenceHistory([]);
     setSequenceNotice("");
     setLibraryPlanPhase(undefined);
+    setHomeDate(localDateKey());
     const raw = await AsyncStorage.getItem(userStorageKey(owner));
     if (!raw) {
       resetWorkspace(owner);
@@ -5431,13 +6207,30 @@ function BlushBodiesApp() {
         date: slot.date ?? localDateKey(),
       })),
     );
-    setLibraryMovements(mergeLibraryCatalog(initialLibrary, stored.libraryMovements ?? []));
-    setFavourites(stored.favourites ?? ["side-leg-lift", "clamshell"]);
-    setSelectedMovement(initialLibrary[0]);
+    const removedMovementIds = stored.deletedMovementIds ?? [];
+    const retainedDeletedItems = pruneRecentlyDeleted(
+      stored.recentlyDeleted ?? [],
+    );
+    const mergedLibrary = mergeLibraryCatalog(
+      initialLibrary,
+      stored.libraryMovements ?? [],
+      removedMovementIds,
+    );
+    setDeletedMovementIds(removedMovementIds);
+    setRecentlyDeleted(retainedDeletedItems);
+    setRecentlyDeletedNotice("");
+    setLibraryMovements(mergedLibrary);
+    setFavourites(
+      (stored.favourites ?? ["side-leg-lift", "clamshell"]).filter(
+        (id) => !removedMovementIds.includes(id),
+      ),
+    );
+    setSelectedMovement(mergedLibrary[0] ?? initialLibrary[0]);
     setInstructorPreferences({
         teachingMode: "Guided",
         vibration: true,
         countdownSound: false,
+        completionSound: true,
         offline: false,
         ...stored.instructorPreferences,
       });
@@ -5638,6 +6431,7 @@ function BlushBodiesApp() {
     setTab("home");
     setScreen("welcome");
   };
+  const recentlyDeletedCount = pruneRecentlyDeleted(recentlyDeleted).length;
   if (screen === "welcome")
     return (
       <Welcome
@@ -5761,6 +6555,12 @@ function BlushBodiesApp() {
           }}
           create={() => setScreen("create")}
           assign={assignPlan}
+          scheduleNext={schedulePlanAt}
+          openSchedule={() => {
+            setScheduleReturnScreen("assign");
+            setScheduleEditId(undefined);
+            setScreen("schedule");
+          }}
         />
       </View>
     );
@@ -5773,7 +6573,7 @@ function BlushBodiesApp() {
           schedule={schedule}
           initialEditId={scheduleEditId}
           back={() => {
-            const destination = scheduleEditId ? "home" : "profile";
+            const destination = scheduleEditId ? "home" : scheduleReturnScreen;
             setScheduleEditId(undefined);
             setScreen(destination);
           }}
@@ -5787,10 +6587,39 @@ function BlushBodiesApp() {
             );
             setScheduleEditId(undefined);
             if (returnHome) setScreen("home");
+            else if (scheduleReturnScreen === "assign") setScreen("assign");
           }}
           remove={(id) =>
             setSchedule((current) => current.filter((slot) => slot.id !== id))
           }
+          cancel={cancelScheduledClass}
+        />
+        {pendingUndo ? (
+          <UndoBanner
+            message={pendingUndo.message}
+            undo={undoPendingDeletion}
+            dismiss={dismissUndo}
+          />
+        ) : null}
+      </View>
+    );
+  if (screen === "recentlyDeleted")
+    return (
+      <View style={s.app}>
+        <StatusBar style="dark" />
+        <TopSafeArea />
+        <RecentlyDeleted
+          items={recentlyDeleted}
+          notice={recentlyDeletedNotice}
+          back={() => {
+            setRecentlyDeletedNotice("");
+            setScreen(recentlyDeletedReturn);
+          }}
+          restore={restoreDeletedItem}
+          remove={(id) => {
+            removeRecentlyDeletedItem(id);
+            setRecentlyDeletedNotice("Item permanently deleted.");
+          }}
         />
       </View>
     );
@@ -5801,6 +6630,7 @@ function BlushBodiesApp() {
         <TopSafeArea />
         <ManagePlan
           plan={plan}
+          schedule={schedule}
           back={() => setScreen("classes")}
           open={() => setScreen("generated")}
           duplicate={duplicatePlan}
@@ -5852,6 +6682,8 @@ function BlushBodiesApp() {
           <InstructorHome
             schedule={schedule}
             account={account}
+            selectedDate={homeDate}
+            setSelectedDate={setHomeDate}
             activeSession={activeTeachingSession}
             create={() => {
               setAssignmentSlotId(undefined);
@@ -5865,20 +6697,18 @@ function BlushBodiesApp() {
             resume={openActiveTeachingSession}
             review={reviewScheduledClass}
             modify={(slot) => {
+              setScheduleReturnScreen("home");
               setScheduleEditId(slot.id);
               setScreen("schedule");
             }}
             remove={(slot) =>
               confirmAction({
-                title: "Delete scheduled class?",
-                message: `${classDateLabel(slot.date, true)} at ${slot.time} will be removed from your schedule.`,
-                confirmText: "Delete",
+                title: "Cancel class?",
+                message: `${classDateLabel(slot.date, true)} at ${slot.time} will move to Cancelled. Its assigned plan will remain saved.`,
+                confirmText: "Cancel Class",
                 cancelText: "Keep class",
                 destructive: true,
-                onConfirm: () =>
-                  setSchedule((current) =>
-                    current.filter((item) => item.id !== slot.id),
-                  ),
+                onConfirm: () => cancelScheduledClass(slot),
               })
             }
             getPlanTitle={(slot) => {
@@ -5913,9 +6743,14 @@ function BlushBodiesApp() {
           <Generated
             plan={plan}
             library={libraryMovements}
+            schedule={schedule}
             back={() => setScreen("classes")}
             edit={() => setScreen("editor")}
             save={savePlan}
+            schedulePlan={() => {
+              setAssignmentSlotId(undefined);
+              setScreen("assign");
+            }}
             teach={() => beginTeachingSession(plan)}
           />
         ) : null}
@@ -5924,11 +6759,18 @@ function BlushBodiesApp() {
             plan={plan}
             hasActiveDraft={hasActiveDraft}
             savedPlans={savedPlans}
+            schedule={schedule}
             lastSession={sessionResult}
             create={() => setScreen("create")}
             open={() => setScreen("generated")}
             duplicate={duplicatePlan}
             removeDraft={deleteDraft}
+            deletedCount={recentlyDeletedCount}
+            openDeleted={() => {
+              setRecentlyDeletedReturn("classes");
+              setRecentlyDeletedNotice("");
+              setScreen("recentlyDeleted");
+            }}
             select={(selected) => {
               setEditorPhase("All");
               setSequenceHistory([]);
@@ -5978,6 +6820,7 @@ function BlushBodiesApp() {
               setMovementToReview(selectedMovement);
               setScreen("customMovement");
             }}
+            remove={() => deleteLibraryMovement(selectedMovement)}
           />
         ) : null}
         {screen === "customMovement" ? (
@@ -6009,6 +6852,12 @@ function BlushBodiesApp() {
               setScreen("customMovement");
             }}
             toggle={toggleFavourite}
+            deletedCount={recentlyDeletedCount}
+            openDeleted={() => {
+              setRecentlyDeletedReturn("library");
+              setRecentlyDeletedNotice("");
+              setScreen("recentlyDeleted");
+            }}
           />
         ) : null}
         {screen === "insights" ? (
@@ -6024,9 +6873,13 @@ function BlushBodiesApp() {
             preferences={instructorPreferences}
             updateAccount={updateAccountDetails}
             updatePreferences={setInstructorPreferences}
-            navigate={(target) =>
-              target === "home" ? setScreen("schedule") : select(target)
-            }
+            navigate={(target) => {
+              if (target === "home") {
+                setScheduleReturnScreen("profile");
+                setScheduleEditId(undefined);
+                setScreen("schedule");
+              } else select(target);
+            }}
             manageData={() => setScreen("dataSettings")}
             openSecurity={() => setScreen("changePassword")}
             logout={logout}
@@ -6037,6 +6890,13 @@ function BlushBodiesApp() {
         ["home", "classes", "library", "insights", "profile"] as Screen[]
       ).includes(screen) ? (
         <Nav tab={tab} setTab={select} />
+      ) : null}
+      {pendingUndo ? (
+        <UndoBanner
+          message={pendingUndo.message}
+          undo={undoPendingDeletion}
+          dismiss={dismissUndo}
+        />
       ) : null}
     </View>
   );
@@ -6230,6 +7090,22 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  headerActions: { flexDirection: "row", alignItems: "center", gap: 8 },
+  deletedCountBadge: {
+    position: "absolute",
+    top: -3,
+    right: -3,
+    minWidth: 17,
+    height: 17,
+    borderRadius: 9,
+    backgroundColor: C.rose,
+    borderWidth: 2,
+    borderColor: C.bg,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 3,
+  },
+  deletedCountText: { color: C.white, fontSize: 8, fontWeight: "900" },
   days: {
     height: 70,
     borderRadius: 18,
@@ -6577,6 +7453,16 @@ const s = StyleSheet.create({
     alignItems: "center",
     gap: 11,
   },
+  cancelledClassCard: {
+    backgroundColor: "#F7F2F1",
+    opacity: 0.64,
+  },
+  scheduleTools: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    flexShrink: 0,
+  },
   assignmentTarget: {
     minHeight: 84,
     borderRadius: 8,
@@ -6588,6 +7474,7 @@ const s = StyleSheet.create({
     alignItems: "center",
     gap: 12,
   },
+  nextSlotCard: { flexWrap: "wrap" },
   assignmentSelected: {
     borderWidth: 1,
     borderColor: C.sage,
@@ -6656,6 +7543,58 @@ const s = StyleSheet.create({
     padding: 16,
     justifyContent: "center",
     gap: 8,
+  },
+  deletedItemCard: {
+    borderRadius: 8,
+    backgroundColor: C.card,
+    padding: 16,
+    gap: 14,
+  },
+  deletedMovementImage: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: C.pale,
+    overflow: "hidden",
+  },
+  deletedPlanIcon: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: C.pale,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  deletedItemActions: {
+    minHeight: 42,
+    borderTopWidth: 1,
+    borderTopColor: C.line,
+    paddingTop: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: 10,
+  },
+  restoreAction: {
+    minHeight: 36,
+    borderRadius: 18,
+    backgroundColor: C.rose,
+    paddingHorizontal: 15,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+  },
+  restoreActionText: { color: C.white, fontSize: 12, fontWeight: "800" },
+  deleteForeverAction: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    borderWidth: 1,
+    borderColor: "#E7C5C5",
+    backgroundColor: "#FFF3F3",
+    alignItems: "center",
+    justifyContent: "center",
   },
   quickGrid: { flexDirection: "row", gap: 10 },
   quickAction: {
@@ -7095,6 +8034,35 @@ const s = StyleSheet.create({
   libraryHeader: { gap: 20 },
   scheduleHeader: { gap: 20 },
   filterRow: { gap: 8, paddingRight: 20 },
+  undoBanner: {
+    position: "absolute",
+    left: 16,
+    right: 16,
+    bottom: 82,
+    minHeight: 56,
+    borderRadius: 8,
+    backgroundColor: C.ink,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    shadowColor: "#000",
+    shadowOpacity: 0.18,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  undoBannerText: { color: C.white, fontSize: 12, fontWeight: "700", flex: 1, minWidth: 0 },
+  undoBannerAction: {
+    minHeight: 34,
+    borderRadius: 17,
+    backgroundColor: C.rose,
+    paddingHorizontal: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+  },
+  undoBannerActionText: { color: C.white, fontSize: 12, fontWeight: "900" },
   libraryRow: {
     minHeight: 72,
     borderRadius: 15,
@@ -7295,6 +8263,7 @@ const s = StyleSheet.create({
     justifyContent: "center",
     gap: 8,
   },
+  detailDeleteAction: { marginTop: 10 },
   dangerText: { color: "#A34848", fontSize: 13, fontWeight: "800" },
 });
 

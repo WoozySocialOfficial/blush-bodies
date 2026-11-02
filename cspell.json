@@ -22,6 +22,14 @@
     "waitlisted",
     "Schedulable",
     "expo",
-    "lucide"
+    "lucide",
+    "VCALENDAR",
+    "PRODID",
+    "CALSCALE",
+    "VEVENT",
+    "blushbodies",
+    "DTSTAMP",
+    "DTSTART",
+    "DTEND"
   ]
 }
