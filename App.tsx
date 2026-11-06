@@ -1,5 +1,7 @@
 import { StatusBar } from "expo-status-bar";
-import { additionalMovements } from "./src/catalogue";
+import { additionalMovements, retiredMovementIds } from "./src/catalogue";
+import { manualArtwork } from "./src/manualArtwork";
+import { createCataloguePlan, replaceCatalogueMovement } from "./src/cataloguePlanning";
 import {
   filterSchedule,
   isFutureScheduleSlot,
@@ -467,133 +469,7 @@ const confirmAction = ({
     },
   ]);
 };
-const initialLibrary: LibraryMovement[] = [
-  ...additionalMovements,
-  {
-    id: "breath-centre", name: "Breath & Centre", position: "Standing",
-    level: "Beginner", equipment: "Mat", duration: 60, phases: ["Warm-up"],
-    cues: ["Settle the breath and find a tall neutral posture."],
-  },
-  {
-    id: "shoulder-rolls", name: "Shoulder Rolls", position: "Standing",
-    level: "Beginner", equipment: "Mat", duration: 60, phases: ["Warm-up"],
-    cues: ["Move slowly and keep the neck relaxed."],
-  },
-  {
-    id: "roll-down", name: "Roll Down", position: "Standing",
-    level: "Beginner", equipment: "Mat", duration: 90, phases: ["Warm-up"],
-    cues: ["Soften the knees and rebuild the spine with control."],
-  },
-  {
-    id: "cat-cow", name: "Cat Cow", position: "Hands & knees",
-    level: "Beginner", equipment: "Mat", duration: 90, phases: ["Warm-up"],
-    cues: ["Move one vertebra at a time with the breath."],
-  },
-  {
-    id: "figure-four", name: "Figure Four Stretch", position: "Supine",
-    sideMode: "paired",
-    level: "Beginner", equipment: "Mat", duration: 60, phases: ["Cool-down"],
-    cues: ["Keep the pelvis heavy and relax into the hip stretch."],
-  },
-  {
-    id: "supine-twist", name: "Supine Twist", position: "Supine",
-    sideMode: "paired",
-    level: "Beginner", equipment: "Mat", duration: 45, phases: ["Cool-down"],
-    cues: ["Let the shoulders stay heavy as the knees lower."],
-  },
-  {
-    id: "closing-breath", name: "Closing Breath", position: "Supine",
-    level: "Beginner", equipment: "Mat", duration: 90, phases: ["Cool-down"],
-    cues: ["Return to an easy breath and release tension."],
-  },
-  {
-    id: "side-leg-lift",
-    sideMode: "paired",
-    name: "Side Leg Lift",
-    position: "Side-lying",
-    level: "Beginner",
-    equipment: "Mat",
-    duration: 120,
-    cues: [
-      "Set up on the supporting side.",
-      "Lift the top leg to hip height.",
-      "Keep the core steady and shoulders relaxed.",
-      "Lower with control.",
-    ],
-  },
-  {
-    id: "clamshell",
-    sideMode: "paired",
-    name: "Clamshell",
-    position: "Side-lying",
-    level: "Beginner",
-    equipment: "Mat",
-    duration: 120,
-    cues: [
-      "Stack the hips and bend the knees.",
-      "Keep the feet together.",
-      "Open the top knee without rolling back.",
-      "Close with control.",
-    ],
-  },
-  {
-    id: "hundred",
-    name: "The Hundred",
-    position: "Supine",
-    level: "Intermediate",
-    equipment: "Mat",
-    duration: 180,
-    cues: [
-      "Find a supported curl.",
-      "Reach through the fingertips.",
-      "Pump the arms with the breath.",
-    ],
-  },
-  {
-    id: "single-leg-stretch",
-    sideMode: "alternating",
-    name: "Single Leg Stretch",
-    position: "Supine",
-    level: "Intermediate",
-    equipment: "Mat",
-    duration: 120,
-    cues: [
-      "Draw one knee toward the chest.",
-      "Extend the opposite leg.",
-      "Switch smoothly without rocking the pelvis.",
-    ],
-  },
-  {
-    id: "spine-twist",
-    name: "Spine Twist",
-    position: "Seated",
-    level: "Beginner",
-    equipment: "Mat",
-    duration: 120,
-    cues: [
-      "Sit tall through the crown.",
-      "Rotate from the ribs.",
-      "Return to centre with control.",
-    ],
-  },
-  {
-    id: "donkey-kick",
-    sideMode: "paired",
-    name: "Donkey Kick",
-    position: "Kneeling",
-    level: "Intermediate",
-    equipment: "Mat",
-    duration: 120,
-    cues: [
-      "Set the hands under the shoulders.",
-      "Keep the pelvis level.",
-      "Press the heel upward without arching the back.",
-    ],
-  },
-].map((movement) => ({
-  ...movement,
-  duration: MOVEMENT_DURATION_SECONDS,
-}) as LibraryMovement);
+const initialLibrary: LibraryMovement[] = additionalMovements;
 const initialSchedule: ScheduledClass[] = [
   {
     id: "slot-0800",
@@ -635,20 +511,6 @@ const initialSchedule: ScheduledClass[] = [
     lesson: "Week 2 · Day 5",
     status: "NEEDS PLAN",
   },
-];
-const slots = [
-  ["08:00", "Beginner", "Week 2 · Day 4", "READY"],
-  ["10:00", "Intermediate", "Week 1 · Day 3", "NEEDS PLAN"],
-  ["12:00", "Beginner", "Week 2 · Day 4", "READY"],
-  ["17:00", "Intermediate", "Week 3 · Day 1", "DRAFT"],
-  ["18:30", "Beginner", "Week 2 · Day 5", "READY"],
-];
-const moves = [
-  ["Breath & Centre", "Standing", "00:45"],
-  ["Shoulder Rolls", "Standing", "00:45"],
-  ["Cat Cow", "Hands & knees", "01:00"],
-  ["Hip Circles", "Standing", "01:10"],
-  ["Roll Down", "Standing", "01:20"],
 ];
 const fmt = (n: number) =>
   String(Math.floor(Math.max(0, n) / 60)).padStart(2, "0") +
@@ -696,6 +558,8 @@ const recoverTeachingPosition = (
 const movementArtworkSource = (
   movement: Pick<PlanMovement, "id" | "position" | "sourceMovementId">,
 ) => {
+  const photo = manualArtwork[movementSourceId(movement)];
+  if (photo) return photo;
   switch (movementSourceId(movement)) {
     case "breath-centre":
     case "closing-breath":
@@ -791,7 +655,7 @@ const movementArtworkSource = (
 const movementArtworkMode = (
   movement: Pick<PlanMovement, "id" | "position" | "sourceMovementId">,
 ) =>
-  [
+  movementSourceId(movement).startsWith("manual-") ? "contain" : [
     "breath-centre",
     "closing-breath",
     "shoulder-rolls",
@@ -807,247 +671,8 @@ const movementArtworkMode = (
   ].includes(movementSourceId(movement))
     ? "contain"
     : "cover";
-const createLegacyPlan = (brief: PlanBrief): ClassPlan => ({
-  id: `BB-${Date.now()}`,
-  version: 1,
-  brief,
-  status: "draft",
-  sequenceMode: "auto",
-  movements: orderMovementsByPosition([
-    {
-      id: "breath-centre",
-      title: "Breath & Centre",
-      position: "Standing",
-      duration: 60,
-      phase: "Warm-up",
-      cue: "Settle the breath and find a tall neutral posture.",
-    },
-    {
-      id: "shoulder-rolls",
-      title: "Shoulder Rolls",
-      position: "Standing",
-      duration: 60,
-      phase: "Warm-up",
-      cue: "Move slowly and keep the neck relaxed.",
-    },
-    {
-      id: "cat-cow",
-      title: "Cat Cow",
-      position: "Hands & knees",
-      duration: 90,
-      phase: "Warm-up",
-      cue: "Move one vertebra at a time with the breath.",
-    },
-    {
-      id: "roll-down",
-      title: "Roll Down",
-      position: "Standing",
-      duration: 90,
-      phase: "Warm-up",
-      cue: "Soften the knees and rebuild the spine with control.",
-    },
-    {
-      id: "side-leg-right",
-      title: "Side Leg Lift · Right",
-      position: "Left side-lying",
-      duration: 240,
-      phase: "Main",
-      cue: "Raise the right leg to hip height with a steady core.",
-    },
-    {
-      id: "side-leg-left",
-      title: "Side Leg Lift · Left",
-      position: "Right side-lying",
-      duration: 240,
-      phase: "Main",
-      cue: "Raise the left leg to hip height with a steady core.",
-    },
-    {
-      id: "clamshell-right",
-      title: "Clamshell · Right",
-      position: "Left side-lying",
-      duration: 240,
-      phase: "Main",
-      cue: "Keep the feet together and open the right knee.",
-    },
-    {
-      id: "clamshell-left",
-      title: "Clamshell · Left",
-      position: "Right side-lying",
-      duration: 240,
-      phase: "Main",
-      cue: "Keep the feet together and open the left knee.",
-    },
-    {
-      id: "hundred",
-      title: "The Hundred",
-      position: "Lying on back",
-      duration: 300,
-      phase: "Main",
-      cue: "Reach long through the fingertips and breathe evenly.",
-    },
-    {
-      id: "single-leg",
-      title: "Single Leg Stretch",
-      position: "Lying on back",
-      duration: 300,
-      phase: "Main",
-      cue: "Keep the pelvis steady as the legs exchange.",
-    },
-    {
-      id: "donkey-kick",
-      side: "alternating",
-      title: "Donkey Kick",
-      position: "Hands & knees",
-      duration: 300,
-      phase: "Main",
-      cue: "Press through the heel without changing the spine.",
-    },
-    {
-      id: "spine-twist",
-      title: "Spine Twist",
-      position: "Seated",
-      duration: 240,
-      phase: "Main",
-      cue: "Grow tall before rotating from the waist.",
-    },
-    {
-      id: "figure-four",
-      side: "alternating",
-      title: "Figure Four Stretch",
-      position: "Lying on back",
-      duration: 120,
-      phase: "Cool-down",
-      cue: "Keep the pelvis heavy and relax into the hip stretch.",
-    },
-    {
-      id: "supine-twist",
-      side: "alternating",
-      title: "Supine Twist",
-      position: "Lying on back",
-      duration: 90,
-      phase: "Cool-down",
-      cue: "Let the shoulders stay heavy as the knees lower.",
-    },
-    {
-      id: "closing-breath",
-      title: "Closing Breath",
-      position: "Lying on back",
-      duration: 90,
-      phase: "Cool-down",
-      cue: "Return to an easy breath and release tension.",
-    },
-  ]),
-});
-
-type TemplateCardInput = {
-  sourceMovementId: string;
-  title: string;
-  position: string;
-  phase: Phase;
-  cue: string;
-  round: number;
-  side?: WorkingSide;
-  pairId?: string;
-  requiresPair?: boolean;
-};
-const templateCard = ({
-  sourceMovementId, title, position, phase, cue, round, side, pairId,
-  requiresPair = false,
-}: TemplateCardInput): PlanMovement => ({
-  id: `template-${phase.toLowerCase()}-${sourceMovementId}-${round}-${side ?? "both"}`,
-  sourceMovementId,
-  pairId: pairId ?? `template-${phase}-${sourceMovementId}-${round}`,
-  title,
-  position,
-  duration: MOVEMENT_DURATION_SECONDS,
-  phase,
-  cue,
-  side,
-  requiresPair,
-});
-const pairedTemplateCards = (
-  input: Omit<TemplateCardInput, "side" | "pairId" | "requiresPair">,
-) => {
-  const pairId = `template-${input.phase}-${input.sourceMovementId}-${input.round}`;
-  return (["left", "right"] as WorkingSide[]).map((side) =>
-    templateCard({
-      ...input,
-      position:
-        positionGroup(input.position) === "Side-lying"
-          ? side === "left" ? "Right side-lying" : "Left side-lying"
-          : input.position,
-      side,
-      pairId,
-      requiresPair: true,
-    }),
-  );
-};
-const repeatedTemplateCards = (
-  input: Omit<TemplateCardInput, "round">,
-  count: number,
-) => Array.from({ length: count }, (_, index) =>
-  templateCard({ ...input, round: index + 1 }));
-
-const createPlan = (brief: PlanBrief): ClassPlan => {
-  const warmUp = [
-    templateCard({ sourceMovementId: "breath-centre", title: "Breath & Centre",
-      position: "Standing", phase: "Warm-up", round: 1,
-      cue: "Settle the breath and find a tall neutral posture." }),
-    templateCard({ sourceMovementId: "shoulder-rolls", title: "Shoulder Rolls",
-      position: "Standing", phase: "Warm-up", round: 1,
-      cue: "Move slowly and keep the neck relaxed." }),
-    templateCard({ sourceMovementId: "roll-down", title: "Roll Down",
-      position: "Standing", phase: "Warm-up", round: 1,
-      cue: "Soften the knees and rebuild the spine with control." }),
-    templateCard({ sourceMovementId: "cat-cow", title: "Cat Cow",
-      position: "Hands & knees", phase: "Warm-up", round: 1,
-      cue: "Move one vertebra at a time with the breath." }),
-  ];
-  const main = [
-    ...pairedTemplateCards({ sourceMovementId: "donkey-kick", title: "Donkey Kick",
-      position: "Hands & knees", phase: "Main", round: 1,
-      cue: "Press through the heel without changing the spine." }),
-    ...pairedTemplateCards({ sourceMovementId: "donkey-kick", title: "Donkey Kick",
-      position: "Hands & knees", phase: "Main", round: 2,
-      cue: "Press through the heel without changing the spine." }),
-    ...Array.from({ length: 3 }, (_, index) => [
-      ...pairedTemplateCards({ sourceMovementId: "side-leg-lift", title: "Side Leg Lift",
-        position: "Side-lying", phase: "Main", round: index + 1,
-        cue: "Raise the working leg to hip height with a steady core." }),
-      ...pairedTemplateCards({ sourceMovementId: "clamshell", title: "Clamshell",
-        position: "Side-lying", phase: "Main", round: index + 1,
-        cue: "Keep the feet together and open the working knee." }),
-    ]).flat(),
-    ...repeatedTemplateCards({ sourceMovementId: "spine-twist", title: "Spine Twist",
-      position: "Seated", phase: "Main",
-      cue: "Grow tall before rotating from the waist." }, 4),
-    ...Array.from({ length: 4 }, (_, index) => [
-      templateCard({ sourceMovementId: "hundred", title: "The Hundred",
-        position: "Lying on back", phase: "Main", round: index + 1,
-        cue: "Reach long through the fingertips and breathe evenly." }),
-      templateCard({ sourceMovementId: "single-leg-stretch", title: "Single Leg Stretch",
-        position: "Lying on back", phase: "Main", round: index + 1,
-        side: "alternating", cue: "Keep the pelvis steady as the legs exchange." }),
-    ]).flat(),
-  ];
-  const coolDown = [
-    ...pairedTemplateCards({ sourceMovementId: "figure-four", title: "Figure Four Stretch",
-      position: "Lying on back", phase: "Cool-down", round: 1,
-      cue: "Keep the pelvis heavy and relax into the hip stretch." }),
-    ...pairedTemplateCards({ sourceMovementId: "supine-twist", title: "Supine Twist",
-      position: "Lying on back", phase: "Cool-down", round: 1,
-      cue: "Let the shoulders stay heavy as the knees lower." }),
-  ];
-  return {
-    id: `BB-${Date.now()}`,
-    version: 1,
-    brief,
-    status: "draft",
-    sequenceMode: "auto",
-    movements: orderMovementsByPosition([...warmUp, ...main, ...coolDown]),
-  };
-};
+const createPlan = (brief: PlanBrief, library = initialLibrary): ClassPlan =>
+  createCataloguePlan(brief, library, `BB-${Crypto.randomUUID()}`);
 
 function MovementVisual({ movement, style, label, resizeMode }: {
   movement: Pick<PlanMovement, "id" | "position" | "sourceMovementId" | "imageUri">;
@@ -1061,7 +686,7 @@ function MovementVisual({ movement, style, label, resizeMode }: {
       resizeMode={resizeMode ?? (movement.imageUri ? "cover" : movementArtworkMode(movement))}
       accessibilityLabel={label} />
   ) : (
-    <View style={[style as StyleProp<ViewStyle>, s.pendingVisual]} accessibilityLabel="Movement visual pending">
+    <View style={[style as StyleProp<ViewStyle>, s.pendingVisual]} accessibilityLabel={movementSourceId(movement).startsWith("manual-") ? "No photo supplied in the manual" : "Movement visual pending"}>
       <UserRound size={24} color={C.rose} />
     </View>
   );
@@ -2977,65 +2602,12 @@ function Classes({
     applyChange(next, "manual");
   };
   const replace = (index: number) => {
-    const current = plan.movements[index];
-    const alternatives: Record<Phase, [string, string, string][]> = {
-      "Warm-up": [
-        [
-          "Standing Reach",
-          "Standing",
-          "Reach overhead without lifting the ribs.",
-        ],
-        [
-          "Hip Circles",
-          "Standing",
-          "Circle smoothly through a comfortable range.",
-        ],
-      ],
-      Main: [
-        [
-          "Bridge",
-          "Lying on back",
-          "Lift the hips while keeping the ribs soft.",
-        ],
-        [
-          "Bird Dog",
-          "Hands & knees",
-          "Reach opposite limbs without shifting the trunk.",
-        ],
-      ],
-      "Cool-down": [
-        [
-          "Figure Four Stretch",
-          "Lying on back",
-          "Keep the breath easy and the hips relaxed.",
-        ],
-        [
-          "Seated Side Bend",
-          "Seated",
-          "Lengthen both sides before returning upright.",
-        ],
-      ],
-    };
-    const choice =
-      alternatives[current.phase].find((item) => item[0] !== current.title) ??
-      alternatives[current.phase][0];
-    applyChange(
-      plan.movements.map((movement, i) =>
-        i === index
-          ? {
-              ...movement,
-              id: `${choice[0].toLowerCase().replace(/\s+/g, "-")}-${Date.now()}`,
-              sourceMovementId: undefined,
-              side: undefined,
-              requiresPair: undefined,
-              pairId: undefined,
-              title: choice[0],
-              position: choice[1],
-              cue: choice[2],
-            }
-          : movement,
-      ),
-    );
+    const next = replaceCatalogueMovement(plan, index, library, Crypto.randomUUID());
+    if (next === plan.movements) {
+      Alert.alert("No replacement available", "Add or review another movement for this phase and class level.");
+      return;
+    }
+    applyChange(next);
   };
   const remove = (index: number) =>
     applyChange(plan.movements.filter((_, i) => i !== index));
@@ -3652,6 +3224,50 @@ function RecentlyDeleted({
     </ScrollView>
   );
 }
+function ManualReference({ movement }: { movement: LibraryMovement }) {
+  const [expanded, setExpanded] = useState(false);
+  const manual = movement.manual!;
+  const sections = [
+    ["Set-up", manual.setup],
+    ["Movement & breath", manual.movement],
+    ["Watch points", manual.watchPoints],
+    ["Progressions", manual.progressions],
+    ["Regressions / preparations", manual.regressions],
+    ["Variations", manual.variations],
+    ["Additional watch points", manual.additionalWatchPoints],
+    ["Muscles", manual.muscles],
+    ["Purpose", manual.purpose],
+  ];
+  return (
+    <View>
+      <Text style={s.group}>FROM THE MANUAL</Text>
+      <Text style={s.sub}>{manual.document} / pages {manual.pages.join(", ")}</Text>
+      <Text style={s.sub}>{manual.units.join(" / ")}</Text>
+      {manual.coverage === "reference-only" ? (
+        <Text style={s.planningWarning}>Reference only: no complete written teaching sequence is supplied.</Text>
+      ) : null}
+      {!movement.imageUri && !manualArtwork[movement.id] ? <Text style={s.sub}>No photo supplied in the manual.</Text> : null}
+      {manual.notes.map((note, index) => <Text key={index} style={s.sequenceNotice}>{note}</Text>)}
+      <Text style={s.sub}>1:15 is the app's planning block, not a duration prescribed by the manual.</Text>
+      <Pressable onPress={() => setExpanded(!expanded)} accessibilityRole="button"
+        accessibilityState={{ expanded }} style={s.cue}>
+        <Text style={s.cueText}>{expanded ? "Hide source details" : "Show source details"}</Text>
+        <ChevronDown size={18} color={C.rose} />
+      </Pressable>
+      {expanded ? <>
+        <Text style={s.sub}>{manual.levelNote}</Text>
+        {movement.mainLevel ? <Text style={s.sub}>Main phase: {movement.mainLevel} and above.</Text> : null}
+        {sections.filter(([, value]) => value).map(([label, value]) => (
+          <View key={label}>
+            <Text style={s.label}>{label}</Text>
+            <Text style={s.cueText}>{value}</Text>
+          </View>
+        ))}
+      </> : null}
+    </View>
+  );
+}
+
 function Details({
   movement,
   plan,
@@ -3723,7 +3339,7 @@ function Details({
           <Text style={s.detailTime}>{fmt(movement.duration)} {movement.sideMode === "paired" ? "per side" : "planned"}</Text>
         </View>
         <Text style={s.group}>TEACHING CUES</Text>
-        {movement.reviewStatus === "needs-review" ? <Text style={s.planningWarning}>Sample movement / Instructor review required</Text> : null}
+        {movement.reviewStatus === "needs-review" ? <Text style={s.planningWarning}>Instructor review required</Text> : null}
         {movement.reviewedBy ? <Text style={s.sequenceNotice}>Reviewed by {movement.reviewedBy}</Text> : null}
         {movement.cues.map((cue, index) => (
           <View key={`${movement.id}-${index}`} style={s.cue}>
@@ -3733,6 +3349,7 @@ function Details({
             <Text style={s.cueText}>{cue}</Text>
           </View>
         ))}
+        {movement.manual ? <ManualReference movement={movement} /> : null}
         {planning && movement.sideMode === "paired" ? (
           <>
             <Text style={s.label}>PARTICIPANT WORKING SIDE</Text>
@@ -4019,6 +3636,8 @@ function Library({
         (!needle ||
           [
             movement.name,
+            ...(movement.aliases ?? []),
+            ...(movement.manual?.units ?? []),
             movement.position,
             movement.equipment,
             movement.level,
@@ -4056,7 +3675,7 @@ function Library({
         <TextInput
           value={query}
           onChangeText={setQuery}
-          placeholder="Search movement, position or equipment"
+          placeholder="Search movement, series or position"
           placeholderTextColor={C.muted}
           style={s.input}
         />
@@ -4207,6 +3826,7 @@ function CustomMovement({
       return;
     }
     save({
+      ...initialMovement,
       id: initialMovement?.id ?? `custom-${Crypto.randomUUID()}`,
       name: name.trim(),
       imageUri,
@@ -5528,8 +5148,8 @@ function BlushBodiesApp() {
   const [pendingUndo, setPendingUndo] = useState<PendingUndo | null>(null);
   const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [favourites, setFavourites] = useState<string[]>([
-    "side-leg-lift",
-    "clamshell",
+    "manual-clam",
+    "manual-shoulder-bridge",
   ]);
   const [selectedMovement, setSelectedMovement] = useState<LibraryMovement>(
     initialLibrary[0],
@@ -6133,21 +5753,21 @@ function BlushBodiesApp() {
       ),
     );
   };
-  const createDefaultPlan = () =>
+  const createDefaultPlan = (library = libraryMovements) =>
     createPlan({
       program: "Beginner Foundations",
       week: "Week 2",
       day: "Day 4",
       energy: "Flowing",
       equipment: ["Mat"],
-    });
+    }, library);
   const resetWorkspace = (owner: Account) => {
     setEditorPhase("All");
     setSequenceHistory([]);
     setSequenceNotice("");
     setLibraryPlanPhase(undefined);
     setAccount(owner);
-    setPlan(createDefaultPlan());
+    setPlan(createDefaultPlan(initialLibrary));
     setHasActiveDraft(true);
     setSavedPlans([]);
     setSessionResult(null);
@@ -6161,7 +5781,7 @@ function BlushBodiesApp() {
     setDeletedMovementIds([]);
     setRecentlyDeleted([]);
     setRecentlyDeletedNotice("");
-    setFavourites(["side-leg-lift", "clamshell"]);
+    setFavourites(["manual-clam", "manual-shoulder-bridge"]);
     setSelectedMovement(initialLibrary[0]);
     setInstructorPreferences({
       teachingMode: "Guided",
@@ -6188,7 +5808,6 @@ function BlushBodiesApp() {
       name: stored.account?.name ?? owner.name,
       phone: stored.account?.phone,
     });
-    setPlan(stored.plan ?? createDefaultPlan());
     setHasActiveDraft(
       stored.hasActiveDraft ?? (stored.plan ? stored.plan.status === "draft" : true),
     );
@@ -6215,14 +5834,16 @@ function BlushBodiesApp() {
       initialLibrary,
       stored.libraryMovements ?? [],
       removedMovementIds,
+      retiredMovementIds,
     );
+    setPlan(stored.plan ?? createDefaultPlan(mergedLibrary));
     setDeletedMovementIds(removedMovementIds);
     setRecentlyDeleted(retainedDeletedItems);
     setRecentlyDeletedNotice("");
     setLibraryMovements(mergedLibrary);
     setFavourites(
-      (stored.favourites ?? ["side-leg-lift", "clamshell"]).filter(
-        (id) => !removedMovementIds.includes(id),
+      (stored.favourites ?? ["manual-clam", "manual-shoulder-bridge"]).filter(
+        (id) => mergedLibrary.some((movement) => movement.id === id),
       ),
     );
     setSelectedMovement(mergedLibrary[0] ?? initialLibrary[0]);
@@ -6729,7 +6350,7 @@ function BlushBodiesApp() {
             back={() => setScreen(assignmentSlotId ? "assign" : "home")}
             generate={(brief, fromScratch) => {
               setEditorPhase("All");
-              const created = createPlan(brief);
+              const created = createPlan(brief, libraryMovements);
               setPlan(fromScratch ? { ...created, movements: [] } : created);
               setHasActiveDraft(true);
               setSequenceHistory([]);

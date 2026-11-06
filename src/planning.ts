@@ -47,19 +47,48 @@ export type LibraryMovement = {
   reviewStatus?: "needs-review" | "reviewed";
   reviewedBy?: string;
   reviewedAt?: number;
+  catalogueVersion?: string;
+  aliases?: string[];
+  mainLevel?: string;
+  manual?: {
+    document: string;
+    pages: number[];
+    units: string[];
+    coverage: "detailed" | "reference-only";
+    classification: "standard" | "restricted";
+    levelNote: string;
+    setup?: string;
+    movement?: string;
+    watchPoints?: string;
+    progressions?: string;
+    regressions?: string;
+    variations?: string;
+    additionalWatchPoints?: string;
+    muscles?: string;
+    purpose?: string;
+    notes: string[];
+  };
 };
 
 export const mergeLibraryCatalog = (
   catalog: LibraryMovement[],
   stored: LibraryMovement[],
   deletedMovementIds: string[] = [],
+  retiredMovementIds: string[] = [],
 ) => {
   const deleted = new Set(deletedMovementIds);
-  const availableStored = stored.filter((movement) => !deleted.has(movement.id));
+  const retired = new Set(retiredMovementIds);
+  // An instructor-edited sample is personal work, even when its bundled default is retired.
+  const availableStored = stored.filter((movement) => !deleted.has(movement.id) &&
+    (!retired.has(movement.id) || !!movement.reviewedBy));
   const existing = new Set(availableStored.map((movement) => movement.id));
   return [
     ...availableStored.map((movement) => {
       const baseline = catalog.find((item) => item.id === movement.id);
+      // Refresh bundled source data, preserving explicit instructor edits and approvals.
+      if (baseline?.manual) return movement.reviewedBy
+        ? { ...baseline, ...movement, manual: baseline.manual, catalogueVersion: baseline.catalogueVersion }
+        : { ...baseline, ...(movement.imageUri ? { imageUri: movement.imageUri } : {}) };
       const phases = movement.phases ?? baseline?.phases;
       const sideMode = movement.sideMode ?? baseline?.sideMode;
       const cues = movement.cues?.length ? movement.cues : baseline?.cues ?? [];
@@ -255,7 +284,9 @@ export const suggestMovements = (plan: ClassPlan, library: LibraryMovement[], ph
   const used = new Set(phaseMoves.map(movementSourceId));
   const candidates = library
     .filter((move) => (move.phases ?? ["Main"]).includes(phase) &&
+      (!move.manual || move.reviewStatus !== "needs-review") &&
       levels.indexOf(move.level) >= 0 && levels.indexOf(move.level) <= level &&
+      (phase !== "Main" || !move.mainLevel || levels.indexOf(move.mainLevel) <= level) &&
       move.equipment.split(/[,/&+]/).every((item) =>
         ["none", "bodyweight"].includes(item.trim().toLowerCase()) || equipment.has(item.trim().toLowerCase())) &&
       selectionDuration(move) <= remaining)
@@ -332,6 +363,12 @@ export const classReadiness = (plan: ClassPlan, library: LibraryMovement[] = [])
     if (source?.reviewStatus === "needs-review") errors.push(`${source.name}: instructor review is still needed.`);
     if (source?.phases?.length && !source.phases.includes(move.phase))
       errors.push(`${source.name}: ${move.phase.toLowerCase()} is not an approved phase.`);
+    if (source?.manual) {
+      const levels = ["Beginner", "Intermediate", "Advanced"];
+      const required = move.phase === "Main" ? source.mainLevel ?? source.level : source.level;
+      if (levels.indexOf(required) > levels.indexOf(planLevel(plan)))
+        errors.push(`${source.name}: this version requires a ${required.toLowerCase()} class.`);
+    }
     const side = workingSide(move);
     if (move.requiresPair || source?.sideMode === "paired" || legacyPairedFamilies.has(family) || side === "left" || side === "right") {
       if (side === "alternating") continue;
