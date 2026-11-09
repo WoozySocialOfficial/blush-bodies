@@ -4,7 +4,7 @@ import {
   insertMovement, mergeLibraryCatalog, movementSourceId, nextPlanningPhase,
   orderMovementsByPosition, phaseRemaining, phaseTotal, positionGroup,
   sequenceForTeaching, sequenceWarnings, suggestMovements, updatePlanSequence,
-  classReadiness, selectionDuration, sideLabel, syncMovementImage, workingSide, MOVEMENT_DURATION_SECONDS,
+  classReadiness, planLevel, selectionDuration, sideLabel, syncMovementImage, workingSide, MOVEMENT_DURATION_SECONDS,
 } from "../src/planning.ts";
 import { additionalMovements, retiredMovementIds } from "../src/catalogue.ts";
 import { createCataloguePlan, replaceCatalogueMovement } from "../src/cataloguePlanning.ts";
@@ -96,6 +96,23 @@ test("rescheduling preserves class assignment data and rejects overlaps", () => 
   );
 });
 
+test("overlap checks include classes that cross midnight", () => {
+  assert.equal(
+    scheduleSlotsOverlap(
+      { date: "2026-10-23", time: "23:45" },
+      { date: "2026-10-24", time: "00:00" },
+    ),
+    true,
+  );
+  assert.equal(
+    scheduleSlotsOverlap(
+      { date: "2026-10-23", time: "23:00" },
+      { date: "2026-10-24", time: "00:00" },
+    ),
+    false,
+  );
+});
+
 test("recently deleted items expire after the retention window", () => {
   const day = 24 * 60 * 60 * 1000;
   const now = Date.UTC(2026, 9, 21, 12);
@@ -130,6 +147,17 @@ test("restoring a plan reconnects open classes without replacing newer assignmen
       { id: "taken", status: "READY", planId: "newer-plan" },
       { id: "other", status: "NEEDS PLAN" },
     ],
+  );
+});
+
+test("restoring a plan never reopens a class cancelled after deletion", () => {
+  assert.deepEqual(
+    restoreScheduleAssignments(
+      [{ id: "cancelled", status: "CANCELLED" }],
+      [{ id: "cancelled", status: "READY" }],
+      "restored-plan",
+    ),
+    [{ id: "cancelled", status: "CANCELLED", planId: "restored-plan" }],
   );
 });
 
@@ -450,6 +478,41 @@ test("readiness checks every phase, invalid durations and incomplete cues", () =
   assert(classReadiness(draft).errors.some((message) => message.includes("complete the name")));
 });
 
+test("plan level remains stable when its display name changes", () => {
+  const advanced = plan([], {
+    brief: {
+      program: "Advanced Strong Pilates",
+      level: "Advanced",
+      week: "Week 1",
+      day: "Day 1",
+      equipment: ["Mat"],
+      energy: "Strong",
+    },
+  });
+  advanced.brief.program = "Tuesday Flow";
+  assert.equal(planLevel(advanced), "Advanced");
+});
+
+test("readiness enforces level and equipment for custom movements", () => {
+  const draft = completePlan();
+  draft.movements[4] = {
+    ...draft.movements[4],
+    sourceMovementId: "custom-band",
+    title: "Custom band challenge",
+  };
+  const report = classReadiness(draft, [
+    libraryMovement("custom-band", {
+      name: "Custom band challenge",
+      level: "Advanced",
+      equipment: "Band",
+      phases: ["Main"],
+      reviewStatus: "reviewed",
+    }),
+  ]);
+  assert(report.errors.some((message) => message.includes("requires an advanced class")));
+  assert(report.errors.some((message) => message.includes("add Band")));
+});
+
 test("balanced cards are required even when total class timing is correct", () => {
   const draft = completePlan();
   draft.movements.splice(4, 2,
@@ -569,6 +632,22 @@ test("manual templates fill all phases at each level with reviewed movements and
     assert(generated.movements.every((item) => item.sourceMovementId.startsWith("manual-")));
     assert.deepEqual(classReadiness(generated, additionalMovements).errors, []);
   }
+});
+
+test("energy choices produce distinct ready-to-teach sequences", () => {
+  const energies = ["Calm", "Flowing", "Energising", "Strong"];
+  const generated = energies.map((energy) =>
+    createCataloguePlan(
+      { ...plan().brief, level: "Beginner", energy },
+      additionalMovements,
+      energy,
+    ),
+  );
+  const signatures = generated.map((item) =>
+    item.movements.map((movement) => movement.sourceMovementId).join(","),
+  );
+  assert.equal(new Set(signatures).size, energies.length);
+  assert(generated.every((item) => classReadiness(item, additionalMovements).ready));
 });
 
 test("templates respect removed movements and leave an incomplete draft for an empty library", () => {

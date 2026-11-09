@@ -2,9 +2,11 @@ export type Phase = "Warm-up" | "Main" | "Cool-down";
 export type SequenceMode = "auto" | "manual";
 export type SideSelection = "both" | "left" | "right";
 export type WorkingSide = "left" | "right" | "alternating";
+export type ClassLevel = "Beginner" | "Intermediate" | "Advanced";
 export const MOVEMENT_DURATION_SECONDS = 75;
 export type PlanBrief = {
   program: string;
+  level?: ClassLevel;
   week: string;
   day: string;
   scheduledDate?: string;
@@ -128,6 +130,7 @@ export const phaseRemaining = (plan: ClassPlan, phase: Phase) =>
 export const nextPlanningPhase = (plan: ClassPlan): Phase =>
   PHASES.find((phase) => phaseRemaining(plan, phase) > 0) ?? "Cool-down";
 export const planLevel = (plan: ClassPlan) => {
+  if (plan.brief.level) return plan.brief.level;
   const program = plan.brief.program.toLowerCase();
   if (program.includes("advanced") || program.includes("strong")) return "Advanced";
   if (program.includes("intermediate")) return "Intermediate";
@@ -363,11 +366,28 @@ export const classReadiness = (plan: ClassPlan, library: LibraryMovement[] = [])
     if (source?.reviewStatus === "needs-review") errors.push(`${source.name}: instructor review is still needed.`);
     if (source?.phases?.length && !source.phases.includes(move.phase))
       errors.push(`${source.name}: ${move.phase.toLowerCase()} is not an approved phase.`);
-    if (source?.manual) {
+    if (source) {
       const levels = ["Beginner", "Intermediate", "Advanced"];
       const required = move.phase === "Main" ? source.mainLevel ?? source.level : source.level;
-      if (levels.indexOf(required) > levels.indexOf(planLevel(plan)))
-        errors.push(`${source.name}: this version requires a ${required.toLowerCase()} class.`);
+      const requiredLevel = levels.indexOf(required);
+      if (requiredLevel >= 0 && requiredLevel > levels.indexOf(planLevel(plan)))
+        errors.push(
+          `${source.name}: this version requires ${required === "Advanced" ? "an" : "a"} ${required.toLowerCase()} class.`,
+        );
+      const availableEquipment = new Set(
+        plan.brief.equipment.map((item) => item.trim().toLowerCase()),
+      );
+      const missingEquipment = source.equipment
+        .split(/[,/&+]/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .filter(
+          (item) =>
+            !["none", "bodyweight"].includes(item.toLowerCase()) &&
+            !availableEquipment.has(item.toLowerCase()),
+        );
+      if (missingEquipment.length)
+        errors.push(`${source.name}: add ${missingEquipment.join(" or ")} to the class equipment.`);
     }
     const side = workingSide(move);
     if (move.requiresPair || source?.sideMode === "paired" || legacyPairedFamilies.has(family) || side === "left" || side === "right") {

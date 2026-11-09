@@ -1,7 +1,8 @@
 {
   "expo": {
     "name": "Blush Bodies Planner",
-    "slug": "blush-bodies-planner",
+    "slug": "blush-bodies-planner-app",
+    "owner": "bohlale.shasha",
     "version": "1.0.0",
     "platforms": [
       "ios",
@@ -12,7 +13,12 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": false,
+      "bundleIdentifier": "com.blushbodies.planner",
+      "buildNumber": "1",
+      "config": {
+        "usesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -21,7 +27,10 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -49,6 +58,11 @@
         }
       ],
       "expo-status-bar"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "ccd4a7d1-0062-45e8-9316-df47282bdcd9"
+      }
+    }
   }
 }

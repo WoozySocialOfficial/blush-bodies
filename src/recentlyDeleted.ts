@@ -40,6 +40,12 @@ export const restoreScheduleAssignments = <T extends RestorableScheduleSlot>(
   schedule.map((slot) => {
     const assignment = assignments.find((candidate) => candidate.id === slot.id);
     if (!assignment || slot.planId) return slot;
+    if (slot.status === "CANCELLED") {
+      return {
+        ...slot,
+        ...(planId ? { planId } : {}),
+      };
+    }
     return {
       ...slot,
       status: assignment.status,

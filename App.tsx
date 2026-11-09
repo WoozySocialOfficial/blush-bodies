@@ -470,48 +470,7 @@ const confirmAction = ({
   ]);
 };
 const initialLibrary: LibraryMovement[] = additionalMovements;
-const initialSchedule: ScheduledClass[] = [
-  {
-    id: "slot-0800",
-    date: dateKeyFromOffset(0),
-    time: "08:00",
-    level: "Beginner",
-    lesson: "Week 2 · Day 4",
-    status: "NEEDS PLAN",
-  },
-  {
-    id: "slot-1000",
-    date: dateKeyFromOffset(0),
-    time: "10:00",
-    level: "Intermediate",
-    lesson: "Week 1 · Day 3",
-    status: "NEEDS PLAN",
-  },
-  {
-    id: "slot-1200",
-    date: dateKeyFromOffset(0),
-    time: "12:00",
-    level: "Beginner",
-    lesson: "Week 2 · Day 4",
-    status: "NEEDS PLAN",
-  },
-  {
-    id: "slot-1700",
-    date: dateKeyFromOffset(0),
-    time: "17:00",
-    level: "Intermediate",
-    lesson: "Week 3 · Day 1",
-    status: "DRAFT",
-  },
-  {
-    id: "slot-1830",
-    date: dateKeyFromOffset(0),
-    time: "18:30",
-    level: "Beginner",
-    lesson: "Week 2 · Day 5",
-    status: "NEEDS PLAN",
-  },
-];
+const initialSchedule: ScheduledClass[] = [];
 const fmt = (n: number) =>
   String(Math.floor(Math.max(0, n) / 60)).padStart(2, "0") +
   ":" +
@@ -2230,6 +2189,11 @@ function Create({
     }
     generate({
       program,
+      level: program === programs[1]
+        ? "Intermediate"
+        : program === programs[2]
+          ? "Advanced"
+          : "Beginner",
       week,
       day,
       scheduledDate,
@@ -4119,21 +4083,25 @@ function Profile({
   manageData,
   openSecurity,
   logout,
+  saveStatus,
 }: {
   account: Account;
   preferences: InstructorPreferences;
-  updateAccount: (account: Account) => void;
+  updateAccount: (account: Account) => Promise<string | null>;
   updatePreferences: (preferences: InstructorPreferences) => void;
   navigate: (screen: Tab) => void;
   manageData: () => void;
   openSecurity: () => void;
   logout: () => void;
+  saveStatus: "saved" | "saving" | "error";
 }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(account.name);
   const [email, setEmail] = useState(account.email);
   const [error, setError] = useState("");
-  const saveAccount = () => {
+  const [submitting, setSubmitting] = useState(false);
+  const saveAccount = async () => {
+    if (submitting) return;
     const cleanEmail = email.trim().toLowerCase();
     if (!name.trim()) {
       setError("Enter your name.");
@@ -4143,7 +4111,17 @@ function Profile({
       setError("Enter a valid email address.");
       return;
     }
-    updateAccount({ ...account, name: name.trim(), email: cleanEmail });
+    setSubmitting(true);
+    const updateError = await updateAccount({
+      ...account,
+      name: name.trim(),
+      email: cleanEmail,
+    });
+    setSubmitting(false);
+    if (updateError) {
+      setError(updateError);
+      return;
+    }
     setError("");
     setEditing(false);
   };
@@ -4210,7 +4188,10 @@ function Profile({
               />
             </View>
             <View style={s.flex}>
-              <Main label="Save Details" onPress={saveAccount} />
+              <Main
+                label={submitting ? "Saving..." : "Save Details"}
+                onPress={() => void saveAccount()}
+              />
             </View>
           </View>
         </View>
@@ -4293,18 +4274,6 @@ function Profile({
               onPress={() => toggle("completionSound")}
             />
           </View>
-          <View style={s.setting}>
-            <View>
-              <Text style={s.settingText}>Offline plans</Text>
-              <Text style={s.duration}>
-                {preferences.offline ? "Downloaded" : "Not downloaded"}
-              </Text>
-            </View>
-            <Toggle
-              value={preferences.offline}
-              onPress={() => toggle("offline")}
-            />
-          </View>
         </View>
       </View>
       <View>
@@ -4337,6 +4306,16 @@ function Profile({
           </Pressable>
         </View>
       </View>
+      <Text
+        accessibilityLiveRegion="polite"
+        style={saveStatus === "error" ? s.formError : s.duration}
+      >
+        {saveStatus === "saving"
+          ? "Saving changes..."
+          : saveStatus === "error"
+            ? "Changes are not saved. Keep the app open and try again."
+            : "All changes saved on this device."}
+      </Text>
       <Outline label="Log Out" onPress={logout} />
     </ScrollView>
   );
@@ -4488,10 +4467,10 @@ function DataSettings({
 }) {
   const confirmReset = () =>
     confirmAction({
-      title: "Reset all app data?",
+      title: "Delete this account and its data?",
       message:
-        "This removes saved plans, schedules, custom movements, insights, profile details and preferences from this device.",
-      confirmText: "Reset everything",
+        "This permanently removes this account, saved plans, schedules, custom movements, insights, profile details and preferences from this device.",
+      confirmText: "Delete account",
       destructive: true,
       onConfirm: reset,
     });
@@ -4524,10 +4503,10 @@ function DataSettings({
         </Text>
         <Text style={s.whyCopy}>Passwords are never stored here.</Text>
       </View>
-      <Text style={s.group}>RESET</Text>
+      <Text style={s.group}>DELETE ACCOUNT</Text>
       <Pressable onPress={confirmReset} style={s.dangerAction}>
         <Trash2 size={19} color="#A34848" />
-        <Text style={s.dangerText}>Reset all app data</Text>
+        <Text style={s.dangerText}>Delete account and local data</Text>
       </Pressable>
     </ScrollView>
   );
@@ -4798,7 +4777,7 @@ function TeachingSession({
     const result: SessionResult = {
       startedAt,
       endedAt: Date.now(),
-      completed: index + 1,
+      completed: completed ? movements.length : index,
       total: movements.length,
       plannedSeconds: planTotal(plan),
       actualSeconds: Math.max(1, Math.floor((Date.now() - startedAt) / 1000)),
@@ -4907,12 +4886,7 @@ function TeachingSession({
     exit();
   };
   const upcoming = movements[index + 1];
-  const classLevel = plan.brief.program.toLowerCase().includes("intermediate")
-    ? "Intermediate"
-    : plan.brief.program.toLowerCase().includes("strong") ||
-        plan.brief.program.toLowerCase().includes("advanced")
-      ? "Advanced"
-      : "Beginner";
+  const classLevel = planLevel(plan);
   return (
     <View style={[s.teach, { paddingTop: safeArea.top }]}>
       <StatusBar style="dark" />
@@ -4995,10 +4969,12 @@ function TeachingSession({
             label={`Demonstration image for ${current.title}`}
           />
         </View>
-        <View style={s.movementCue}>
-          <Text style={[s.label, s.movementCueLabel]}>COACHING CUE</Text>
-          <Text style={s.movementCueText}>{current.cue}</Text>
-        </View>
+        {preferences.teachingMode === "Guided" ? (
+          <View style={s.movementCue}>
+            <Text style={[s.label, s.movementCueLabel]}>COACHING CUE</Text>
+            <Text style={s.movementCueText}>{current.cue}</Text>
+          </View>
+        ) : null}
       </Animated.View>
       <View style={[s.controls, compactTeachingView && s.controlsCompact]}>
         <View style={s.teachControlGroup}>
@@ -5102,6 +5078,7 @@ function BlushBodiesApp() {
   const [plan, setPlan] = useState<ClassPlan>(() =>
     createPlan({
       program: "Beginner Foundations",
+      level: "Beginner",
       week: "Week 2",
       day: "Day 4",
       energy: "Flowing",
@@ -5165,6 +5142,13 @@ function BlushBodiesApp() {
     });
   const [signedIn, setSignedIn] = useState(false);
   const [resetEmail, setResetEmail] = useState("");
+  const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "error">(
+    "saved",
+  );
+  const [persistenceError, setPersistenceError] = useState("");
+  const saveChain = useRef<Promise<void>>(Promise.resolve());
+  const saveGeneration = useRef(0);
+  const latestStoredData = useRef<StoredAppData | null>(null);
   const backgroundedAt = useRef<number | null>(null);
   useEffect(
     () => () => {
@@ -5175,10 +5159,8 @@ function BlushBodiesApp() {
   useEffect(() => {
     void AsyncStorage.removeItem(LEGACY_STORAGE_KEY).catch(() => undefined);
   }, []);
-  useEffect(() => {
-    if (!signedIn) return;
-    const stored: StoredAppData = {
-      account,
+  const storedData = (owner: Account = account): StoredAppData => ({
+      account: owner,
       plan,
       hasActiveDraft,
       savedPlans,
@@ -5190,11 +5172,35 @@ function BlushBodiesApp() {
       favourites,
       instructorPreferences,
       activeTeachingSession,
-    };
-    const saveTimer = setTimeout(() => {
-      void AsyncStorage.setItem(userStorageKey(account), JSON.stringify(stored));
-    }, 300);
-    return () => clearTimeout(saveTimer);
+    });
+  const queueWorkspaceSave = (
+    stored: StoredAppData,
+    key = userStorageKey(stored.account),
+  ) => {
+    const generation = ++saveGeneration.current;
+    setSaveStatus("saving");
+    const task = saveChain.current.then(() =>
+      AsyncStorage.setItem(key, JSON.stringify(stored)),
+    );
+    saveChain.current = task.catch(() => undefined);
+    void task.then(() => {
+      if (generation !== saveGeneration.current) return;
+      setPersistenceError("");
+      setSaveStatus("saved");
+    }).catch(() => {
+      if (generation !== saveGeneration.current) return;
+      setPersistenceError(
+        "Your latest changes could not be saved. Keep the app open and try again.",
+      );
+      setSaveStatus("error");
+    });
+    return task;
+  };
+  useEffect(() => {
+    if (!signedIn) return;
+    const stored = storedData();
+    latestStoredData.current = stored;
+    void queueWorkspaceSave(stored).catch(() => undefined);
   }, [
     signedIn,
     account,
@@ -5210,6 +5216,10 @@ function BlushBodiesApp() {
     instructorPreferences,
     activeTeachingSession,
   ]);
+  useEffect(() => {
+    if (!persistenceError) return;
+    Alert.alert("Changes not saved", persistenceError);
+  }, [persistenceError]);
   useEffect(() => {
     if (Platform.OS === "web") return;
     const subscription = AppState.addEventListener("change", (nextState) => {
@@ -5295,6 +5305,29 @@ function BlushBodiesApp() {
     }
   };
   const savePlan = () => {
+    if (plan.brief.scheduledDate && plan.brief.scheduledTime) {
+      const proposed = {
+        date: plan.brief.scheduledDate,
+        time: plan.brief.scheduledTime,
+      };
+      const conflict = schedule.find(
+        (slot) =>
+          slot.status !== "CANCELLED" &&
+          slot.id !== assignmentSlotId &&
+          !(
+            slot.date === proposed.date &&
+            slot.time === proposed.time &&
+            (!slot.planId || slot.planId === plan.id)
+          ) &&
+          scheduleSlotsOverlap(proposed, slot),
+      );
+      if (conflict) {
+        setSequenceNotice(
+          `This class overlaps the ${conflict.time} class on ${classDateLabel(conflict.date, true)}.`,
+        );
+        return;
+      }
+    }
     const report = classReadiness(plan, libraryMovements);
     if (!report.ready) {
       setSequenceNotice("Resolve the class readiness issues before saving.");
@@ -5310,7 +5343,7 @@ function BlushBodiesApp() {
     setPlan((current) => ({
       ...current,
       version: current.version + 1,
-      brief: { ...current.brief, program: name },
+      brief: { ...current.brief, level: planLevel(current), program: name },
     }));
     setSavedPlans((current) =>
       current.map((saved) =>
@@ -5318,7 +5351,7 @@ function BlushBodiesApp() {
           ? {
               ...saved,
               version: saved.version + 1,
-              brief: { ...saved.brief, program: name },
+              brief: { ...saved.brief, level: planLevel(saved), program: name },
             }
           : saved,
       ),
@@ -5756,6 +5789,7 @@ function BlushBodiesApp() {
   const createDefaultPlan = (library = libraryMovements) =>
     createPlan({
       program: "Beginner Foundations",
+      level: "Beginner",
       week: "Week 2",
       day: "Day 4",
       energy: "Flowing",
@@ -6000,57 +6034,101 @@ function BlushBodiesApp() {
       return "The local password could not be reset. Please try again.";
     }
   };
-  const updateAccountDetails = (nextAccount: Account) => {
+  const updateAccountDetails = async (
+    nextAccount: Account,
+  ): Promise<string | null> => {
     const previous = account;
-    setAccount(nextAccount);
-    if (previous.email !== nextAccount.email) {
-      void AsyncStorage.removeItem(userStorageKey(previous)).catch(
-        () => undefined,
+    const oldKey = userStorageKey(previous);
+    const nextKey = userStorageKey(nextAccount);
+    try {
+      await saveChain.current;
+      const credentials = await readCredentials();
+      const credentialIndex = credentials.findIndex(
+        (credential) =>
+          credential.role === previous.role &&
+          credential.email === previous.email,
+      );
+      if (credentialIndex < 0)
+        return "Account credentials could not be found.";
+      const emailTaken = credentials.some(
+        (credential, index) =>
+          index !== credentialIndex &&
+          credential.role === nextAccount.role &&
+          credential.email === nextAccount.email,
+      );
+      if (emailTaken) return "An account already exists for this email.";
+
+      const nextStored = storedData(nextAccount);
+      await AsyncStorage.setItem(nextKey, JSON.stringify(nextStored));
+      const nextCredentials = [...credentials];
+      nextCredentials[credentialIndex] = {
+        ...nextCredentials[credentialIndex],
+        name: nextAccount.name,
+        email: nextAccount.email,
+      };
+      try {
+        await writeCredentials(nextCredentials);
+      } catch (error) {
+        if (nextKey !== oldKey)
+          await AsyncStorage.removeItem(nextKey).catch(() => undefined);
+        throw error;
+      }
+      if (nextKey !== oldKey)
+        await AsyncStorage.removeItem(oldKey).catch(() => undefined);
+      latestStoredData.current = nextStored;
+      setAccount(nextAccount);
+      setPersistenceError("");
+      setSaveStatus("saved");
+      signInAttempts.delete(signInAttemptKey(previous.role, previous.email));
+      return null;
+    } catch {
+      return "Account details could not be saved. Please try again.";
+    }
+  };
+  const logout = async () => {
+    const stored = latestStoredData.current ?? storedData();
+    try {
+      await queueWorkspaceSave(stored);
+      setSessionResult(null);
+      setSignedIn(false);
+      setScreen("welcome");
+    } catch {
+      Alert.alert(
+        "Could not log out safely",
+        "Your latest changes are not saved yet. Please try again.",
       );
     }
-    void readCredentials()
-      .then((credentials) =>
-        writeCredentials(
-          credentials.map((credential) =>
-            credential.role === previous.role &&
-            credential.email === previous.email
-              ? {
-                  ...credential,
-                  name: nextAccount.name,
-                  email: nextAccount.email,
-                }
-              : credential,
-          ),
-        ),
-      )
-      .catch(() => undefined);
   };
-  const logout = () => {
-    setSessionResult(null);
-    setSignedIn(false);
-    setScreen("welcome");
-  };
-  const resetAppData = () => {
-    void AsyncStorage.getAllKeys()
-      .then((keys) =>
-        AsyncStorage.multiRemove(
-          keys.filter(
-            (key) =>
-              key === LEGACY_STORAGE_KEY ||
-              key.startsWith(USER_STORAGE_PREFIX),
-          ),
+  const resetAppData = async () => {
+    try {
+      await saveChain.current;
+      await AsyncStorage.removeItem(userStorageKey(account));
+      const credentials = await readCredentials();
+      await writeCredentials(
+        credentials.filter(
+          (credential) =>
+            !(
+              credential.role === account.role &&
+              credential.email === account.email
+            ),
         ),
-      )
-      .catch(() => undefined);
-    void deleteCredentials();
-    resetWorkspace({
-      name: "Blush Bodies Instructor",
-      email: "coach@blushbodies.com",
-      role: "instructor",
-    });
-    setSignedIn(false);
-    setTab("home");
-    setScreen("welcome");
+      );
+      signInAttempts.delete(signInAttemptKey(account.role, account.email));
+      latestStoredData.current = null;
+      resetWorkspace({
+        name: "Blush Bodies Instructor",
+        email: "coach@blushbodies.com",
+        role: "instructor",
+      });
+      setSignedIn(false);
+      setTab("home");
+      setScreen("welcome");
+    } catch {
+      Alert.alert(
+        "Account not deleted",
+        "Your account and local data could not be removed. Please try again.",
+      );
+    }
   };
   const recentlyDeletedCount = pruneRecentlyDeleted(recentlyDeleted).length;
   if (screen === "welcome")
@@ -6125,6 +6203,10 @@ function BlushBodiesApp() {
             );
           }
           setSessionResult(result);
+          setSessionHistory((current) => [
+            result,
+            ...current.filter((session) => session.startedAt !== result.startedAt),
+          ]);
           setScreen("summary");
         }}
       />
@@ -6139,7 +6221,12 @@ function BlushBodiesApp() {
           done={(notes) => {
             const completed = { ...sessionResult, notes };
             setSessionResult(completed);
-            setSessionHistory((current) => [completed, ...current]);
+            setSessionHistory((current) => [
+              completed,
+              ...current.filter(
+                (session) => session.startedAt !== completed.startedAt,
+              ),
+            ]);
             setScreen("home");
           }}
         />
@@ -6504,6 +6591,7 @@ function BlushBodiesApp() {
             manageData={() => setScreen("dataSettings")}
             openSecurity={() => setScreen("changePassword")}
             logout={logout}
+            saveStatus={saveStatus}
           />
         ) : null}
       </View>

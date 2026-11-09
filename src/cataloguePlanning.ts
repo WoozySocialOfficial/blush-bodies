@@ -10,10 +10,19 @@ export const createCataloguePlan = (
 ): ClassPlan => {
   let plan: ClassPlan = { id, version: 1, brief, status: "draft", sequenceMode: "auto", movements: [] };
   const reviewed = library.filter((move) => move.reviewStatus === "reviewed" && move.cues.length);
+  const energyOffset: Record<string, number> = {
+    Flowing: 0,
+    Calm: 1,
+    Energising: 2,
+    Strong: 2,
+  };
   let count = 0;
   for (const phase of PHASES) {
     while (phaseRemaining(plan, phase) > 0) {
-      const choice = suggestMovements(plan, reviewed, phase)[0]?.movement;
+      const suggestions = suggestMovements(plan, reviewed, phase);
+      const offset = energyOffset[brief.energy] ?? 0;
+      const energyIndex = brief.energy === "Strong" ? count * 2 + 1 : offset + count;
+      const choice = suggestions[energyIndex % suggestions.length]?.movement;
       if (!choice) break; // An incomplete draft explains missing time in the existing readiness checks.
       plan = { ...plan, movements: insertMovement(plan, choice, phase, `${id}-${++count}`) };
     }

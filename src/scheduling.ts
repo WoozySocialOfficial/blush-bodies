@@ -29,12 +29,12 @@ export const scheduleSlotsOverlap = (
   second: SchedulePoint,
   durationMinutes = 45,
 ) => {
-  if (first.date !== second.date) return false;
-  const firstStart = minutesFromTime(first.time);
-  const secondStart = minutesFromTime(second.time);
+  const firstStart = scheduleSlotStartsAt(first).getTime();
+  const secondStart = scheduleSlotStartsAt(second).getTime();
+  const duration = durationMinutes * 60_000;
   return (
-    firstStart < secondStart + durationMinutes &&
-    secondStart < firstStart + durationMinutes
+    firstStart < secondStart + duration &&
+    secondStart < firstStart + duration
   );
 };
 
