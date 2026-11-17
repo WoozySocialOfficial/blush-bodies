@@ -2,6 +2,9 @@ const localDateKey = (date: Date) =>
   `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 
 type SchedulePoint = { date: string; time: string; status?: string };
+type ScheduleIdentity = { id: string };
+type ScheduleSlot = ScheduleIdentity & { date: string; time: string };
+type ScheduleAssignment = ScheduleIdentity & { status: string; planId?: string };
 
 export type ScheduleFilter =
   | "Upcoming"
@@ -43,6 +46,35 @@ export const rescheduleSlot = <T extends SchedulePoint>(
   date: string,
   time: string,
 ): T => ({ ...slot, date, time });
+
+export const upsertScheduleSlot = <T extends ScheduleSlot>(
+  schedule: readonly T[],
+  slot: T,
+): T[] =>
+  [...schedule.filter((item) => item.id !== slot.id), slot].sort((first, second) =>
+    `${first.date} ${first.time}`.localeCompare(`${second.date} ${second.time}`),
+  );
+
+export const removeScheduleSlot = <T extends ScheduleIdentity>(
+  schedule: readonly T[],
+  id: string,
+): T[] => schedule.filter((slot) => slot.id !== id);
+
+export const setScheduleStatus = <T extends ScheduleAssignment>(
+  schedule: readonly T[],
+  id: string,
+  status: T["status"],
+): T[] =>
+  schedule.map((slot) => (slot.id === id ? { ...slot, status } : slot));
+
+export const assignSchedulePlan = <T extends ScheduleAssignment>(
+  schedule: readonly T[],
+  id: string,
+  planId: string,
+): T[] =>
+  schedule.map((slot) =>
+    slot.id === id ? { ...slot, planId, status: "READY" } : slot,
+  );
 
 export const filterSchedule = <T extends SchedulePoint>(
   schedule: T[],

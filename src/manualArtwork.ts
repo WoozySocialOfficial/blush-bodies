@@ -51,6 +51,8 @@ export const manualArtwork: Partial<Record<string, ImageSourcePropType>> = {
   "manual-side-kick-kneeling": require("../assets/manual-exercises/side-kick-kneeling.jpg"),
   "manual-side-bend": require("../assets/manual-exercises/side-bend.jpg"),
   "manual-mermaid": require("../assets/manual-exercises/mermaid.jpg"),
+  "manual-figure-four-stretch": require("../assets/movement-figure-four.jpg"),
+  "manual-spinal-twist-supine": require("../assets/movement-supine-twist.jpg"),
   "manual-double-arm-frontal-raise": require("../assets/manual-exercises/double-arm-frontal-raise.jpg"),
   "manual-upper-body-reaches": require("../assets/manual-exercises/upper-body-reaches.jpg"),
   "manual-mermaid-standing": require("../assets/manual-exercises/mermaid-standing.jpg"),

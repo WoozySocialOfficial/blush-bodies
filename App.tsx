@@ -3,13 +3,38 @@ import { additionalMovements, retiredMovementIds } from "./src/catalogue";
 import { manualArtwork } from "./src/manualArtwork";
 import { createCataloguePlan, replaceCatalogueMovement } from "./src/cataloguePlanning";
 import {
+  countdownCueSecond,
+  isRecoverableTeachingSession,
+  recoverTeachingPosition,
+} from "./src/teaching";
+import { enqueueWorkspaceSave } from "./src/workspacePersistence";
+import {
+  listRemoteWorkspaces,
+  loadRemoteWorkspaceState,
+  saveRemoteWorkspaceState,
+} from "./src/remoteWorkspace";
+import { requireSupabase, supabase, supabaseConfigured } from "./src/supabase";
+import {
+  isOwnedMovementImageUri,
+  referencedMovementImageUris,
+} from "./src/movementImages";
+import {
+  createWorkspaceBackupEnvelope,
+  parseWorkspaceBackup,
+  safeBackupImageFileName,
+} from "./src/workspaceBackup";
+import {
+  assignSchedulePlan,
   filterSchedule,
   isFutureScheduleSlot,
   nextAvailableClassSlot,
+  removeScheduleSlot,
   rescheduleSlot,
   scheduleSlotsOverlap,
   scheduleTimeOptions,
+  setScheduleStatus,
   timeFromMinutes,
+  upsertScheduleSlot,
   type ScheduleFilter,
 } from "./src/scheduling";
 import {
@@ -31,6 +56,7 @@ import {
   type PlanMovement, type SequenceMode, type SideSelection, type WorkingSide, type ReadinessReport,
 } from "./src/planning";
 import * as Crypto from "expo-crypto";
+import * as DocumentPicker from "expo-document-picker";
 import * as Haptics from "expo-haptics";
 import * as FileSystem from "expo-file-system/legacy";
 import * as ImagePicker from "expo-image-picker";
@@ -76,6 +102,8 @@ import {
   TriangleAlert,
 } from "lucide-react-native";
 import {
+  memo,
+  useCallback,
   useDeferredValue,
   useEffect,
   useMemo,
@@ -186,7 +214,6 @@ type InstructorPreferences = {
   vibration: boolean;
   countdownSound: boolean;
   completionSound: boolean;
-  offline: boolean;
 };
 type LocalCredential = {
   name: string;
@@ -209,8 +236,15 @@ type StoredAppData = {
   instructorPreferences: InstructorPreferences;
   activeTeachingSession?: ActiveTeachingSession;
 };
+type BackupLibraryMovement = LibraryMovement & {
+  backupImage?: { fileName: string; base64: string };
+};
+type WorkspaceBackupData = Omit<StoredAppData, "libraryMovements"> & {
+  libraryMovements: BackupLibraryMovement[];
+};
 const LEGACY_STORAGE_KEY = "@blush-bodies/app-data-v1";
 const USER_STORAGE_PREFIX = "@blush-bodies/user-data-v2/";
+const WORKSPACE_RECOVERY_PREFIX = "@blush-bodies/workspace-recovery-v1/";
 const userStorageKey = (account: Pick<Account, "role" | "email">) =>
   `${USER_STORAGE_PREFIX}${account.role}/${account.email.toLowerCase()}`;
 const CREDENTIALS_KEY = "blush-bodies-local-credentials-v1";
@@ -479,41 +513,6 @@ const planTotal = (plan: ClassPlan) =>
   plan.movements.reduce((total, movement) => total + movement.duration, 0);
 const movementLabel = (movement: PlanMovement) =>
   `${movement.title}${sideLabel(movement) ? ` / ${sideLabel(movement)}` : ""}`;
-const recoverTeachingPosition = (
-  session: ActiveTeachingSession,
-  movements: PlanMovement[],
-) => {
-  if (!movements.length) return { movementIndex: 0, remainingSeconds: 0 };
-  let movementIndex = Math.max(
-    0,
-    Math.min(movements.length - 1, session.movementIndex),
-  );
-  let remainingSeconds = Math.max(0, session.remainingSeconds);
-  let elapsedSeconds = session.held
-    ? 0
-    : Math.max(0, Math.floor((Date.now() - session.savedAt) / 1000));
-
-  while (remainingSeconds === 0 && movementIndex < movements.length - 1) {
-    movementIndex += 1;
-    remainingSeconds = Math.max(1, movements[movementIndex].duration);
-  }
-  while (elapsedSeconds > 0) {
-    if (elapsedSeconds < remainingSeconds) {
-      remainingSeconds -= elapsedSeconds;
-      elapsedSeconds = 0;
-      break;
-    }
-    elapsedSeconds -= remainingSeconds;
-    if (movementIndex === movements.length - 1) {
-      remainingSeconds = 0;
-      break;
-    }
-    movementIndex += 1;
-    remainingSeconds = Math.max(1, movements[movementIndex].duration);
-  }
-
-  return { movementIndex, remainingSeconds };
-};
 const movementArtworkSource = (
   movement: Pick<PlanMovement, "id" | "position" | "sourceMovementId">,
 ) => {
@@ -633,6 +632,13 @@ const movementArtworkMode = (
 const createPlan = (brief: PlanBrief, library = initialLibrary): ClassPlan =>
   createCataloguePlan(brief, library, `BB-${Crypto.randomUUID()}`);
 
+const deleteOwnedMovementImage = async (imageUri: string | undefined) => {
+  if (!isOwnedMovementImageUri(imageUri, FileSystem.documentDirectory)) return;
+  await FileSystem.deleteAsync(imageUri!, { idempotent: true }).catch(
+    () => undefined,
+  );
+};
+
 function MovementVisual({ movement, style, label, resizeMode }: {
   movement: Pick<PlanMovement, "id" | "position" | "sourceMovementId" | "imageUri">;
   style: StyleProp<ImageStyle>;
@@ -709,7 +715,12 @@ function Main({
   Icon?: typeof Plus;
 }) {
   return (
-    <Pressable onPress={onPress} style={s.main}>
+    <Pressable
+      onPress={onPress}
+      style={s.main}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+    >
       {Icon ? <Icon size={17} color={C.white} /> : null}
       <Text style={s.mainText}>{label}</Text>
     </Pressable>
@@ -717,7 +728,12 @@ function Main({
 }
 function Outline({ label, onPress }: { label: string; onPress: () => void }) {
   return (
-    <Pressable onPress={onPress} style={s.outline}>
+    <Pressable
+      onPress={onPress}
+      style={s.outline}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+    >
       <Text style={s.outlineText}>{label}</Text>
     </Pressable>
   );
@@ -768,7 +784,11 @@ function Header({
   return (
     <View style={s.header}>
       {back ? (
-        <Pressable onPress={back}>
+        <Pressable
+          onPress={back}
+          accessibilityRole="button"
+          accessibilityLabel="Go back"
+        >
           <ArrowLeft size={21} color={C.muted} />
         </Pressable>
       ) : null}
@@ -792,7 +812,14 @@ function Nav({ tab, setTab }: { tab: Tab; setTab: (tab: Tab) => void }) {
   return (
     <View style={s.nav}>
       {items.map(([id, label, Icon]) => (
-        <Pressable key={id} onPress={() => setTab(id)} style={s.navItem}>
+        <Pressable
+          key={id}
+          onPress={() => setTab(id)}
+          style={s.navItem}
+          accessibilityRole="tab"
+          accessibilityLabel={label}
+          accessibilityState={{ selected: id === tab }}
+        >
           <Icon size={22} color={id === tab ? C.rose : C.muted} />
           <Text style={[s.navLabel, id === tab && s.navLabelOn]}>{label}</Text>
         </Pressable>
@@ -894,6 +921,7 @@ function SignIn({
         <View style={s.form}>
           <Text style={s.label}>EMAIL</Text>
           <TextInput
+            accessibilityLabel="Email address"
             value={email}
             onChangeText={(value) => {
               setEmail(value);
@@ -913,6 +941,7 @@ function SignIn({
           />
           <Text style={s.label}>PASSWORD</Text>
           <TextInput
+            accessibilityLabel="Password"
             value={password}
             onChangeText={(value) => {
               setPassword(value);
@@ -950,11 +979,13 @@ function SignIn({
           ) : null}
         </View>
         <View style={s.demoNote}>
-          <Text style={s.whyLabel}>DEMO SESSION</Text>
+          <Text style={s.whyLabel}>YOUR WORKSPACE</Text>
           <Text style={s.whyCopy}>
-            {Platform.OS === "web"
-              ? "Browser preview accounts are local demo data and are not production authentication."
-              : "Native prototype credentials are protected by this device's secure storage."}
+            {supabaseConfigured
+              ? "Your account and shared workspace are securely synced through Supabase."
+              : Platform.OS === "web"
+                ? "Browser accounts are stored in this browser."
+                : "Your workspace and account are protected by this device's secure storage."}
           </Text>
         </View>
       </ScrollView>
@@ -1044,6 +1075,7 @@ function SandboxPasswordReset({
         <View style={s.form}>
           <Text style={s.label}>ACCOUNT EMAIL</Text>
           <TextInput
+            accessibilityLabel="Account email"
             value={email}
             onChangeText={(value) => {
               setEmail(value);
@@ -1061,6 +1093,7 @@ function SandboxPasswordReset({
           />
           <Text style={s.label}>NEW PASSWORD</Text>
           <TextInput
+            accessibilityLabel="New password"
             value={password}
             onChangeText={(value) => {
               setPassword(value);
@@ -1077,6 +1110,7 @@ function SandboxPasswordReset({
           />
           <Text style={s.label}>CONFIRM NEW PASSWORD</Text>
           <TextInput
+            accessibilityLabel="Confirm new password"
             value={confirmation}
             onChangeText={(value) => {
               setConfirmation(value);
@@ -1181,6 +1215,7 @@ function SignUp({
         <View style={s.form}>
           <Text style={s.label}>FULL NAME</Text>
           <TextInput
+            accessibilityLabel="Full name"
             value={name}
             onChangeText={(value) => {
               setName(value);
@@ -1196,6 +1231,7 @@ function SignUp({
           />
           <Text style={s.label}>EMAIL</Text>
           <TextInput
+            accessibilityLabel="Email address"
             value={email}
             onChangeText={(value) => {
               setEmail(value);
@@ -1213,6 +1249,7 @@ function SignUp({
           />
           <Text style={s.label}>PASSWORD</Text>
           <TextInput
+            accessibilityLabel="Password"
             value={password}
             onChangeText={(value) => {
               setPassword(value);
@@ -1228,6 +1265,7 @@ function SignUp({
           />
           <Text style={s.label}>CONFIRM PASSWORD</Text>
           <TextInput
+            accessibilityLabel="Confirm password"
             value={confirmation}
             onChangeText={(value) => {
               setConfirmation(value);
@@ -1253,11 +1291,13 @@ function SignUp({
           />
         </View>
         <View style={s.demoNote}>
-          <Text style={s.whyLabel}>PROTOTYPE ACCOUNT</Text>
+          <Text style={s.whyLabel}>PRIVATE WORKSPACE</Text>
           <Text style={s.whyCopy}>
-            {Platform.OS === "web"
-              ? "Browser preview accounts stay in this browser and are for demonstration only."
-              : "Your profile stays on this device and credentials are protected by secure storage."}
+            {supabaseConfigured
+              ? "Your private workspace syncs across your signed-in devices."
+              : Platform.OS === "web"
+                ? "Your account and workspace stay in this browser."
+                : "Your account and workspace stay private to this device."}
           </Text>
         </View>
       </ScrollView>
@@ -1343,7 +1383,12 @@ function InstructorHome({
         </View>
       </View>
       {activeSession ? (
-        <Pressable onPress={resume} style={s.resumeSession}>
+        <Pressable
+          onPress={resume}
+          style={s.resumeSession}
+          accessibilityRole="button"
+          accessibilityLabel={`Resume ${activeSession.plan.brief.program} class, step ${activeSession.movementIndex + 1} of ${activeSession.plan.movements.length}`}
+        >
           <View style={s.resumeIcon}>
             <Play size={18} color={C.white} fill={C.white} />
           </View>
@@ -1366,6 +1411,9 @@ function InstructorHome({
               key={key}
               onPress={() => setSelectedDate(key)}
               style={[s.day, selected && s.dayOn]}
+              accessibilityRole="radio"
+              accessibilityLabel={classDateLabel(key, true)}
+              accessibilityState={{ checked: selected }}
             >
               <Text style={[s.dayText, selected && s.roseText]}>{day}</Text>
               <Text style={[s.dayNumber, selected && s.roseText]}>
@@ -1377,7 +1425,12 @@ function InstructorHome({
       </View>
       <View style={s.row}>
         <Text style={s.section}>{classDateLabel(selectedDate)} Classes</Text>
-        <Pressable onPress={create} style={s.plan}>
+        <Pressable
+          onPress={create}
+          style={s.plan}
+          accessibilityRole="button"
+          accessibilityLabel="Plan a class"
+        >
           <Plus size={17} color={C.white} />
           <Text style={s.planText}>Plan Class</Text>
         </Pressable>
@@ -1436,6 +1489,8 @@ function InstructorHome({
                   else assign(slot);
                 }}
                 style={[s.classCard, completed && s.completedClassCard]}
+                accessibilityRole="button"
+                accessibilityLabel={`${slot.level} class at ${slot.time}, ${planTitle ?? slot.lesson}, ${completed ? "completed" : ready || inProgress ? inProgress ? "in progress" : "ready to teach" : hasDraft ? "draft available" : "plan needed"}`}
               >
                 <View
                   style={[
@@ -1462,6 +1517,8 @@ function InstructorHome({
                       <Pressable
                         onPress={() => review(slot)}
                         style={s.reviewCompact}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Review ${slot.level} class`}
                       >
                         <BarChart3 size={13} color={C.rose} />
                         <Text style={s.reviewCompactText}>Review</Text>
@@ -1479,6 +1536,8 @@ function InstructorHome({
                           if (!swipeIsBlocked(slot.id)) start(slot);
                         }}
                         style={s.start}
+                        accessibilityRole="button"
+                        accessibilityLabel={`${inProgress ? "Resume" : "Start"} ${slot.level} class`}
                       >
                         <Play size={14} color={C.white} fill={C.white} />
                         <Text style={s.startText}>
@@ -1931,7 +1990,13 @@ function ScheduleManager({
         <Text style={s.label}>LEVEL</Text>
         <View style={s.options}>
           {["Beginner", "Intermediate", "Advanced"].map((option) => (
-            <Pressable key={option} onPress={() => setLevel(option)}>
+            <Pressable
+              key={option}
+              onPress={() => setLevel(option)}
+              accessibilityRole="radio"
+              accessibilityState={{ checked: level === option }}
+              accessibilityLabel={`${option} class level`}
+            >
               <Pill label={option} active={level === option} />
             </Pressable>
           ))}
@@ -1966,7 +2031,13 @@ function ScheduleManager({
             "Cancelled",
           ] as ScheduleFilter[]
         ).map((option) => (
-          <Pressable key={option} onPress={() => setFilter(option)}>
+          <Pressable
+            key={option}
+            onPress={() => setFilter(option)}
+            accessibilityRole="radio"
+            accessibilityState={{ checked: filter === option }}
+            accessibilityLabel={`${option} schedule filter`}
+          >
             <Pill label={option} active={filter === option} />
           </Pressable>
         ))}
@@ -2025,7 +2096,16 @@ function ScheduleManager({
               </Pressable>
               </>
             ) : null}
-            <Pressable onPress={() => confirmRemove(slot)} hitSlop={10}>
+            <Pressable
+              onPress={() => confirmRemove(slot)}
+              hitSlop={10}
+              accessibilityRole="button"
+              accessibilityLabel={
+                slot.status === "CANCELLED"
+                  ? `Permanently delete cancelled ${slot.level} class`
+                  : `Cancel ${slot.level} class`
+              }
+            >
               {slot.status === "CANCELLED" ? (
                 <Trash2 size={18} color="#A34848" />
               ) : (
@@ -2068,14 +2148,23 @@ function ChoiceSelect({
         </Pressable>
       </View>
       <Modal transparent visible={open} animationType="fade">
-        <Pressable onPress={() => setOpen(false)} style={s.choiceBackdrop}>
+        <Pressable
+          onPress={() => setOpen(false)}
+          style={s.choiceBackdrop}
+          accessible={false}
+        >
           <Pressable
             onPress={(event) => event.stopPropagation()}
             style={s.choiceSheet}
           >
             <View style={s.row}>
               <Text style={s.movementTitle}>{label}</Text>
-              <Pressable onPress={() => setOpen(false)} hitSlop={10}>
+              <Pressable
+                onPress={() => setOpen(false)}
+                hitSlop={10}
+                accessibilityRole="button"
+                accessibilityLabel={`Close ${label} options`}
+              >
                 <X size={20} color={C.muted} />
               </Pressable>
             </View>
@@ -2091,6 +2180,9 @@ function ChoiceSelect({
                       setOpen(false);
                     }}
                     style={[s.choiceRow, selected && s.choiceRowSelected]}
+                    accessibilityRole="radio"
+                    accessibilityState={{ checked: selected }}
+                    accessibilityLabel={option}
                   >
                     <Text style={s.settingText}>{option}</Text>
                     {selected ? <Check size={19} color={C.rose} /> : null}
@@ -2211,7 +2303,7 @@ function Create({
             <Pressable
               key={String(scratch)}
               accessibilityRole="radio"
-              aria-checked={fromScratch === scratch}
+              accessibilityState={{ checked: fromScratch === scratch }}
               onPress={() => setFromScratch(scratch)}
               style={[s.sequenceMode, fromScratch === scratch && s.sequenceModeOn]}
             >
@@ -2303,6 +2395,8 @@ function Create({
                 key={x}
                 onPress={() => setEnergy(x)}
                 style={[s.option, energy === x && s.optionOn]}
+                accessibilityRole="radio"
+                accessibilityState={{ checked: energy === x }}
               >
                 <Text style={[s.optionText, energy === x && s.roseText]}>
                   {x}
@@ -2321,6 +2415,8 @@ function Create({
                   key={x}
                   onPress={() => toggleEquipment(x)}
                   style={[s.option, selected && s.optionOn]}
+                  accessibilityRole="checkbox"
+                  accessibilityState={{ checked: selected }}
                 >
                   <Text style={[s.optionText, selected && s.roseText]}>
                     {x}
@@ -2771,7 +2867,12 @@ function Classes({
                 <Text style={s.headerTitle}>Edit Movement</Text>
                 <Text style={s.sub}>Update what the instructor sees in class.</Text>
               </View>
-              <Pressable onPress={closeEditor} style={s.modalClose}>
+              <Pressable
+                onPress={closeEditor}
+                style={s.modalClose}
+                accessibilityRole="button"
+                accessibilityLabel="Close movement editor"
+              >
                 <X size={20} color={C.ink} />
               </Pressable>
             </View>
@@ -2799,7 +2900,7 @@ function Classes({
                     <Text style={s.label}>PARTICIPANT WORKING SIDE</Text>
                     <View style={s.options}>
                       {(["left", "right", "alternating"] as WorkingSide[]).map((side) => (
-                        <Pressable key={side} accessibilityRole="radio" aria-checked={workingSide(draftMovement) === side}
+                        <Pressable key={side} accessibilityRole="radio" accessibilityState={{ checked: workingSide(draftMovement) === side }}
                           onPress={() => setDraftMovement({ ...draftMovement, side,
                             position: positionGroup(draftMovement.position) === "Side-lying" && side !== "alternating"
                               ? side === "left" ? "Right side-lying" : "Left side-lying" : draftMovement.position })}>
@@ -2816,6 +2917,8 @@ function Classes({
                     (phase) => (
                       <Pressable
                         key={phase}
+                        accessibilityRole="radio"
+                        accessibilityState={{ checked: draftMovement.phase === phase }}
                         onPress={() =>
                           setDraftMovement({ ...draftMovement, phase })
                         }
@@ -2852,6 +2955,7 @@ function Classes({
                 <Text style={s.label}>COACHING CUE</Text>
                 <TextInput
                   value={draftMovement.cue}
+                  accessibilityLabel="Coaching cue"
                   onChangeText={(cue) => {
                     setDraftMovement({ ...draftMovement, cue });
                     setEditorError("");
@@ -2955,7 +3059,12 @@ function Plans({
               </View>
             ) : null}
           </Pressable>
-          <Pressable onPress={create} style={s.avatar}>
+          <Pressable
+            onPress={create}
+            style={s.avatar}
+            accessibilityRole="button"
+            accessibilityLabel="Create class plan"
+          >
             <Plus size={22} color={C.rose} />
           </Pressable>
         </View>
@@ -2963,7 +3072,12 @@ function Plans({
       {hasActiveDraft && plan.status === "draft" ? (
         <>
           <Text style={s.group}>DRAFT IN PROGRESS</Text>
-          <Pressable onPress={open} style={s.currentPlan}>
+          <Pressable
+            onPress={open}
+            style={s.currentPlan}
+            accessibilityRole="button"
+            accessibilityLabel={`Continue draft ${plan.brief.program}`}
+          >
             <View style={s.row}>
               <View style={s.flex}>
                 <Text style={s.moveTitle}>{plan.brief.program}</Text>
@@ -2991,7 +3105,12 @@ function Plans({
             <View style={s.flex}>
               <Outline label="Continue Plan" onPress={open} />
             </View>
-            <Pressable onPress={duplicate} style={s.iconAction}>
+            <Pressable
+              onPress={duplicate}
+              style={s.iconAction}
+              accessibilityRole="button"
+              accessibilityLabel="Duplicate draft"
+            >
               <RefreshCw size={18} color={C.rose} />
             </Pressable>
             <Pressable
@@ -3012,6 +3131,8 @@ function Plans({
             key={saved.id}
             onPress={() => select(saved)}
             style={s.savedPlan}
+            accessibilityRole="button"
+            accessibilityLabel={`Open saved plan ${saved.brief.program}, ${saved.brief.week}, ${saved.brief.day}`}
           >
             <View style={s.flex}>
               <Text style={s.moveTitle}>{saved.brief.program}</Text>
@@ -3275,7 +3396,13 @@ function Details({
           title="Movement Details"
           back={back}
           right={
-            <Pressable onPress={toggle} hitSlop={12}>
+            <Pressable
+              onPress={toggle}
+              hitSlop={12}
+              accessibilityRole="button"
+              accessibilityLabel={favourite ? `Remove ${movement.name} from favourites` : `Add ${movement.name} to favourites`}
+              accessibilityState={{ selected: favourite }}
+            >
               <Heart
                 size={21}
                 color={C.rose}
@@ -3443,6 +3570,7 @@ function Summary({
           <Text style={s.label}>GENERAL TEACHING NOTES</Text>
           <TextInput
             value={notes}
+            accessibilityLabel="General teaching notes"
             onChangeText={setNotes}
             multiline
             placeholder="Add a note about the session"
@@ -3562,6 +3690,65 @@ function SessionDetails({
     </ScrollView>
   );
 }
+const LibraryMovementRow = memo(function LibraryMovementRow({
+  movement,
+  favourite,
+  open,
+  toggle,
+}: {
+  movement: LibraryMovement;
+  favourite: boolean;
+  open: (movement: LibraryMovement) => void;
+  toggle: (id: string) => void;
+}) {
+  return (
+    <Pressable
+      onPress={() => open(movement)}
+      style={s.libraryRow}
+      accessibilityRole="button"
+      accessibilityLabel={`${movement.name}, ${movement.level}, ${movement.position}`}
+    >
+      <View style={s.thumb}>
+        <MovementVisual
+          movement={movement}
+          style={s.thumbImage}
+          label={`${movement.name} movement preview`}
+        />
+      </View>
+      <View style={s.flex}>
+        <Text style={s.moveTitle}>{movement.name}</Text>
+        {movement.reviewStatus === "needs-review" ? (
+          <Text style={s.reviewBadge}>NEEDS REVIEW</Text>
+        ) : null}
+        <Text style={s.libraryPhase}>
+          {(movement.phases ?? ["Main"]).join(" / ")}
+        </Text>
+        <Text style={s.sub}>
+          {movement.level} / {movement.position} / {movement.equipment}
+        </Text>
+      </View>
+      <View style={s.libraryDuration}>
+        <Text style={s.duration}>{fmt(movement.duration)}</Text>
+        {movement.sideMode === "paired" ? (
+          <Text style={s.suggestionReason}>/ side</Text>
+        ) : null}
+      </View>
+      <Pressable
+        onPress={() => toggle(movement.id)}
+        hitSlop={10}
+        accessibilityRole="button"
+        accessibilityLabel={`${favourite ? "Remove" : "Add"} ${movement.name} ${favourite ? "from" : "to"} favourites`}
+        accessibilityState={{ selected: favourite }}
+      >
+        <Heart
+          size={20}
+          color={C.rose}
+          fill={favourite ? C.rose : "transparent"}
+        />
+      </Pressable>
+    </Pressable>
+  );
+});
 function Library({
   movements,
   favourites,
@@ -3608,6 +3795,17 @@ function Library({
           ].some((value) => value.toLowerCase().includes(needle))),
     );
   }, [deferredQuery, favouriteIds, filter, movements]);
+  const renderMovement = useCallback(
+    ({ item }: { item: LibraryMovement }) => (
+      <LibraryMovementRow
+        movement={item}
+        favourite={favouriteIds.has(item.id)}
+        open={open}
+        toggle={toggle}
+      />
+    ),
+    [favouriteIds, open, toggle],
+  );
   const header = (
     <View style={s.libraryHeader}>
       <View style={s.row}>
@@ -3629,7 +3827,12 @@ function Library({
               </View>
             ) : null}
           </Pressable>
-          <Pressable onPress={create} style={s.avatar}>
+          <Pressable
+            onPress={create}
+            style={s.avatar}
+            accessibilityRole="button"
+            accessibilityLabel="Add movement"
+          >
             <Plus size={23} color={C.rose} />
           </Pressable>
         </View>
@@ -3642,6 +3845,7 @@ function Library({
           placeholder="Search movement, series or position"
           placeholderTextColor={C.muted}
           style={s.input}
+          accessibilityLabel="Search movement library"
         />
       </View>
       <ScrollView
@@ -3663,7 +3867,13 @@ function Library({
           "Seated",
           "Kneeling",
         ].map((option) => (
-          <Pressable key={option} onPress={() => setFilter(option)}>
+          <Pressable
+            key={option}
+            onPress={() => setFilter(option)}
+            accessibilityRole="radio"
+            accessibilityState={{ checked: filter === option }}
+            accessibilityLabel={`${option} movements`}
+          >
             <Pill label={option} active={filter === option} />
           </Pressable>
         ))}
@@ -3681,41 +3891,8 @@ function Library({
       initialNumToRender={8}
       maxToRenderPerBatch={8}
       windowSize={7}
-      extraData={favourites}
       ListHeaderComponent={header}
-      renderItem={({ item: movement }) => (
-        <Pressable
-          onPress={() => open(movement)}
-          style={s.libraryRow}
-        >
-          <View style={s.thumb}>
-            <MovementVisual
-              movement={movement}
-              style={s.thumbImage}
-              label={`${movement.name} movement preview`}
-            />
-          </View>
-          <View style={s.flex}>
-            <Text style={s.moveTitle}>{movement.name}</Text>
-            {movement.reviewStatus === "needs-review" ? <Text style={s.reviewBadge}>NEEDS REVIEW</Text> : null}
-            <Text style={s.libraryPhase}>{(movement.phases ?? ["Main"]).join(" / ")}</Text>
-            <Text style={s.sub}>
-              {movement.level} / {movement.position} / {movement.equipment}
-            </Text>
-          </View>
-          <View style={s.libraryDuration}>
-            <Text style={s.duration}>{fmt(movement.duration)}</Text>
-            {movement.sideMode === "paired" ? <Text style={s.suggestionReason}>/ side</Text> : null}
-          </View>
-          <Pressable onPress={() => toggle(movement.id)} hitSlop={10}>
-            <Heart
-              size={20}
-              color={C.rose}
-              fill={favouriteIds.has(movement.id) ? C.rose : "transparent"}
-            />
-          </Pressable>
-        </Pressable>
-      )}
+      renderItem={renderMovement}
       ListEmptyComponent={
         <Text style={s.empty}>No movements match your search.</Text>
       }
@@ -3742,8 +3919,25 @@ function CustomMovement({
   const [sideMode, setSideMode] = useState<"together" | "paired" | "alternating">(initialMovement?.sideMode ?? "together");
   const [imageUri, setImageUri] = useState(initialMovement?.imageUri);
   const [error, setError] = useState("");
+  const pendingImageUri = useRef<string | undefined>(undefined);
+  const pendingImageCommitted = useRef(false);
+  useEffect(
+    () => () => {
+      if (!pendingImageCommitted.current && pendingImageUri.current)
+        void deleteOwnedMovementImage(pendingImageUri.current);
+    },
+    [],
+  );
   const pickImage = async () => {
     try {
+      if (Platform.OS !== "web") {
+        const permission =
+          await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!permission.granted) {
+          setError("Allow photo access to add a movement image.");
+          return;
+        }
+      }
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ["images"],
         allowsEditing: Platform.OS !== "web",
@@ -3770,8 +3964,12 @@ function CustomMovement({
         .replace(/[^a-z0-9-]/gi, "-").toLowerCase();
       const destination = `${directory}${movementId}-${Date.now()}.${extension}`;
       await FileSystem.copyAsync({ from: asset.uri, to: destination });
+      const previousPendingImage = pendingImageUri.current;
+      pendingImageUri.current = destination;
       setImageUri(destination);
       setError("");
+      if (previousPendingImage)
+        await deleteOwnedMovementImage(previousPendingImage);
     } catch {
       setError("That photo could not be saved. Please choose another image.");
     }
@@ -3789,6 +3987,7 @@ function CustomMovement({
       setError("Add a movement photo before saving this movement.");
       return;
     }
+    pendingImageCommitted.current = true;
     save({
       ...initialMovement,
       id: initialMovement?.id ?? `custom-${Crypto.randomUUID()}`,
@@ -3838,7 +4037,12 @@ function CustomMovement({
               <Text style={s.imageActionText}>{imageUri || initialMovement ? "Change photo" : "Add photo"}</Text>
             </Pressable>
             {imageUri ? (
-              <Pressable onPress={() => setImageUri(undefined)} style={s.imageAction}
+              <Pressable onPress={() => {
+                const pending = pendingImageUri.current;
+                pendingImageUri.current = undefined;
+                setImageUri(undefined);
+                if (pending) void deleteOwnedMovementImage(pending);
+              }} style={s.imageAction}
                 accessibilityRole="button" accessibilityLabel="Remove movement photo">
                 <Trash2 size={17} color={C.rose} />
                 <Text style={s.imageActionText}>Remove</Text>
@@ -3858,7 +4062,8 @@ function CustomMovement({
           <View style={s.options}>
             {["Standing", "Side-lying", "Supine", "Seated", "Kneeling", "Hands & knees", "Prone"].map(
               (option) => (
-                <Pressable key={option} onPress={() => setPosition(option)}>
+                <Pressable key={option} onPress={() => setPosition(option)} accessibilityRole="radio"
+                  accessibilityState={{ checked: position === option }}>
                   <Pill label={option} active={position === option} />
                 </Pressable>
               ),
@@ -3867,7 +4072,8 @@ function CustomMovement({
           <Text style={s.label}>LEVEL</Text>
           <View style={s.options}>
             {["Beginner", "Intermediate", "Advanced"].map((option) => (
-              <Pressable key={option} onPress={() => setLevel(option)}>
+              <Pressable key={option} onPress={() => setLevel(option)} accessibilityRole="radio"
+                accessibilityState={{ checked: level === option }}>
                 <Pill label={option} active={level === option} />
               </Pressable>
             ))}
@@ -3875,6 +4081,7 @@ function CustomMovement({
           <Text style={s.label}>EQUIPMENT</Text>
           <TextInput
             value={equipment}
+            accessibilityLabel="Equipment"
             onChangeText={setEquipment}
             placeholder="Mat, band or none"
             placeholderTextColor={C.muted}
@@ -3888,7 +4095,7 @@ function CustomMovement({
           <Text style={s.label}>SIDES</Text>
           <View style={s.options}>
             {(["together", "paired", "alternating"] as const).map((option) => (
-              <Pressable key={option} onPress={() => setSideMode(option)} accessibilityRole="radio" aria-checked={sideMode === option}>
+              <Pressable key={option} onPress={() => setSideMode(option)} accessibilityRole="radio" accessibilityState={{ checked: sideMode === option }}>
                 <Pill label={option === "together" ? "Together" : option === "paired" ? "Separate sides" : "Alternating"} active={sideMode === option} />
               </Pressable>
             ))}
@@ -3898,7 +4105,7 @@ function CustomMovement({
             {PHASES.map((option) => (
               <Pressable key={option} onPress={() => setPhases((current) => current.includes(option)
                 ? current.filter((item) => item !== option) : [...current, option])} accessibilityRole="checkbox"
-                aria-checked={phases.includes(option)}>
+                accessibilityState={{ checked: phases.includes(option) }}>
                 <Pill label={option} active={phases.includes(option)} />
               </Pressable>
             ))}
@@ -4126,18 +4333,21 @@ function Profile({
     setEditing(false);
   };
   const toggle = (
-    key: "vibration" | "countdownSound" | "completionSound" | "offline",
+    key: "vibration" | "countdownSound" | "completionSound",
   ) =>
     updatePreferences({ ...preferences, [key]: !preferences[key] });
   const Toggle = ({
+    label,
     value,
     onPress,
   }: {
+    label: string;
     value: boolean;
     onPress: () => void;
   }) => (
     <Pressable
       accessibilityRole="switch"
+      accessibilityLabel={label}
       accessibilityState={{ checked: value }}
       onPress={onPress}
       style={[s.switchTrack, value && s.switchOn]}
@@ -4151,6 +4361,8 @@ function Profile({
       <Pressable
         onPress={() => setEditing((value) => !value)}
         style={s.profileCard}
+        accessibilityRole="button"
+        accessibilityLabel="Edit profile details"
       >
         <View style={s.largeAvatar}>
           <UserRound size={28} color={C.rose} />
@@ -4165,9 +4377,10 @@ function Profile({
       {editing ? (
         <View style={s.profileEditor}>
           <Text style={s.label}>FULL NAME</Text>
-          <TextInput value={name} onChangeText={setName} style={s.formInput} />
+          <TextInput accessibilityLabel="Full name" value={name} onChangeText={setName} style={s.formInput} />
           <Text style={s.label}>EMAIL ADDRESS</Text>
           <TextInput
+            accessibilityLabel="Email address"
             value={email}
             onChangeText={setEmail}
             autoCapitalize="none"
@@ -4226,6 +4439,8 @@ function Profile({
                 s.modeOption,
                 preferences.teachingMode === mode && s.modeOptionOn,
               ]}
+              accessibilityRole="radio"
+              accessibilityState={{ checked: preferences.teachingMode === mode }}
             >
               <Text
                 style={[
@@ -4241,7 +4456,7 @@ function Profile({
         <Text style={s.sub}>
           {preferences.teachingMode === "Guided"
             ? "Shows step-by-step cues while teaching."
-            : "Shows movement names and timers with fewer prompts."}
+            : "Shows movement names with fewer prompts."}
         </Text>
       </View>
       <View>
@@ -4250,6 +4465,7 @@ function Profile({
           <View style={s.setting}>
             <Text style={s.settingText}>Vibration cues</Text>
             <Toggle
+              label="Vibration cues"
               value={preferences.vibration}
               onPress={() => toggle("vibration")}
             />
@@ -4260,6 +4476,7 @@ function Profile({
               <Text style={s.duration}>Short cue at 3, 2 and 1 seconds</Text>
             </View>
             <Toggle
+              label="Countdown sound"
               value={preferences.countdownSound}
               onPress={() => toggle("countdownSound")}
             />
@@ -4270,9 +4487,19 @@ function Profile({
               <Text style={s.duration}>Final chime after the last movement</Text>
             </View>
             <Toggle
+              label="Class completion sound"
               value={preferences.completionSound}
               onPress={() => toggle("completionSound")}
             />
+          </View>
+          <View style={s.setting}>
+            <View style={s.flex}>
+              <Text style={s.settingText}>Offline ready</Text>
+              <Text style={s.duration}>
+                Plans and movement photos are stored on this device
+              </Text>
+            </View>
+            <Check size={20} color={C.sage} />
           </View>
         </View>
       </View>
@@ -4393,6 +4620,7 @@ function ChangePassword({
         <View style={s.form}>
           <Text style={s.label}>CURRENT PASSWORD</Text>
           <TextInput
+            accessibilityLabel="Current password"
             value={currentPassword}
             onChangeText={(value) => {
               setCurrentPassword(value);
@@ -4407,6 +4635,7 @@ function ChangePassword({
           />
           <Text style={s.label}>NEW PASSWORD</Text>
           <TextInput
+            accessibilityLabel="New password"
             value={newPassword}
             onChangeText={(value) => {
               setNewPassword(value);
@@ -4421,6 +4650,7 @@ function ChangePassword({
           />
           <Text style={s.label}>CONFIRM NEW PASSWORD</Text>
           <TextInput
+            accessibilityLabel="Confirm new password"
             value={confirmation}
             onChangeText={(value) => {
               setConfirmation(value);
@@ -4456,21 +4686,31 @@ function DataSettings({
   sessions,
   customMovements,
   back,
+  backup,
+  restoreBackup,
   reset,
+  sharedWorkspace,
 }: {
   savedPlans: number;
   schedule: number;
   sessions: number;
   customMovements: number;
   back: () => void;
+  backup: () => Promise<void>;
+  restoreBackup: () => Promise<void>;
   reset: () => void;
+  sharedWorkspace: boolean;
 }) {
+  const [backingUp, setBackingUp] = useState(false);
+  const [restoring, setRestoring] = useState(false);
   const confirmReset = () =>
     confirmAction({
       title: "Delete this account and its data?",
       message:
-        "This permanently removes this account, saved plans, schedules, custom movements, insights, profile details and preferences from this device.",
-      confirmText: "Delete account",
+        sharedWorkspace
+          ? "This removes the local cache and signs out. Shared workspace data and the Supabase account are not deleted."
+          : "This permanently removes this account, saved plans, schedules, custom movements, insights, profile details and preferences from this device.",
+      confirmText: sharedWorkspace ? "Clear and sign out" : "Delete account",
       destructive: true,
       onConfirm: reset,
     });
@@ -4484,8 +4724,9 @@ function DataSettings({
     <ScrollView contentContainerStyle={s.page}>
       <Header title="App Data" back={back} />
       <Text style={s.sub}>
-        Your app content is stored locally on this device so it remains after
-        closing or reloading Expo.
+        {sharedWorkspace
+          ? "Your shared workspace syncs through Supabase and keeps an offline cache on this device."
+          : "Your app content is stored locally on this device so it remains after closing or reloading Expo."}
       </Text>
       <View style={s.stats}>
         {counts.map(([count, label]) => (
@@ -4503,10 +4744,55 @@ function DataSettings({
         </Text>
         <Text style={s.whyCopy}>Passwords are never stored here.</Text>
       </View>
-      <Text style={s.group}>DELETE ACCOUNT</Text>
+      <Text style={s.group}>BACKUP</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Export a backup of this workspace"
+        disabled={backingUp}
+        onPress={() => {
+          if (backingUp) return;
+          setBackingUp(true);
+          void backup().finally(() => setBackingUp(false));
+        }}
+        style={[s.backupAction, backingUp && s.actionDisabled]}
+      >
+        <ArrowDown size={19} color={C.rose} />
+        <View style={s.flex}>
+          <Text style={s.backupTitle}>
+            {backingUp ? "Preparing backup..." : "Export workspace backup"}
+          </Text>
+          <Text style={s.backupCopy}>
+            Save plans, classes, sessions, library changes and custom photos.
+          </Text>
+        </View>
+      </Pressable>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Restore this workspace from a backup file"
+        disabled={restoring}
+        onPress={() => {
+          if (restoring) return;
+          setRestoring(true);
+          void restoreBackup().finally(() => setRestoring(false));
+        }}
+        style={[s.backupAction, restoring && s.actionDisabled]}
+      >
+        <ArrowUp size={19} color={C.rose} />
+        <View style={s.flex}>
+          <Text style={s.backupTitle}>
+            {restoring ? "Checking backup..." : "Restore workspace backup"}
+          </Text>
+          <Text style={s.backupCopy}>
+            Replace this account's local data with a saved backup file.
+          </Text>
+        </View>
+      </Pressable>
+      <Text style={s.group}>{sharedWorkspace ? "LOCAL CACHE" : "DELETE ACCOUNT"}</Text>
       <Pressable onPress={confirmReset} style={s.dangerAction}>
         <Trash2 size={19} color="#A34848" />
-        <Text style={s.dangerText}>Delete account and local data</Text>
+        <Text style={s.dangerText}>
+          {sharedWorkspace ? "Clear local cache and sign out" : "Delete account and local data"}
+        </Text>
       </Pressable>
     </ScrollView>
   );
@@ -4593,6 +4879,7 @@ function ManagePlan({
         <View style={s.profileEditor}>
           <Text style={s.label}>PLAN NAME</Text>
           <TextInput
+            accessibilityLabel="Plan name"
             value={name}
             onChangeText={setName}
             autoFocus
@@ -4694,14 +4981,14 @@ function TeachingSession({
   const [index, setIndex] = useState(restored.movementIndex);
   const [startedAt] = useState(session.startedAt);
   const [moveTime, setMoveTime] = useState(restored.remainingSeconds);
-  const countdownPlayer = useAudioPlayer(
-    require("./assets/countdown-beep.wav"),
-  );
   const completionPlayer = useAudioPlayer(
     require("./assets/class-complete.wav"),
   );
-  const lastCountdownCue = useRef("");
+  const countdownPlayer = useAudioPlayer(
+    require("./assets/countdown-beep.wav"),
+  );
   const endingRef = useRef(false);
+  const lastCountdownCue = useRef<number | null>(null);
   const indexRef = useRef(restored.movementIndex);
   const moveTimeRef = useRef(restored.remainingSeconds);
   const lastTickAt = useRef(Date.now());
@@ -4709,10 +4996,6 @@ function TeachingSession({
   const cardOpacity = useRef(new Animated.Value(1)).current;
   const transitioning = useRef(false);
   const current = movements[index];
-  const movementProgress =
-    current.duration > 0
-      ? Math.min(1, Math.max(0, (current.duration - moveTime) / current.duration))
-      : 1;
   const sequenceProgress = movements.length > 0 ? (index + 1) / movements.length : 0;
   const saveCheckpoint = (
     movementIndex: number,
@@ -4847,29 +5130,33 @@ function TeachingSession({
       indexRef.current = nextIndex;
       moveTimeRef.current = remainingSeconds;
       if (movementChanged) {
+        lastCountdownCue.current = null;
         setIndex(nextIndex);
         saveCheckpoint(nextIndex, remainingSeconds, false);
+      }
+      const cueSecond = countdownCueSecond(
+        remainingSeconds,
+        lastCountdownCue.current,
+        preferences.countdownSound,
+      );
+      if (cueSecond !== null) {
+        lastCountdownCue.current = cueSecond;
+        void countdownPlayer
+          .seekTo(0)
+          .then(() => countdownPlayer.play())
+          .catch(() => undefined);
+      } else if (remainingSeconds > 3) {
+        lastCountdownCue.current = null;
       }
       setMoveTime(remainingSeconds);
     };
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, [held, movements]);
+  }, [countdownPlayer, held, movements, preferences.countdownSound]);
   useEffect(() => {
     if (preferences.vibration)
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
   }, [index, preferences.vibration]);
-  useEffect(() => {
-    if (!preferences.countdownSound || held || moveTime < 1 || moveTime > 3)
-      return;
-    const cue = `${index}:${moveTime}`;
-    if (lastCountdownCue.current === cue) return;
-    lastCountdownCue.current = cue;
-    void countdownPlayer
-      .seekTo(0)
-      .then(() => countdownPlayer.play())
-      .catch(() => undefined);
-  }, [countdownPlayer, held, index, moveTime, preferences.countdownSound]);
   const nextStep = () => {
     if (index < movements.length - 1) go(index + 1);
     else confirmEnd();
@@ -4910,25 +5197,11 @@ function TeachingSession({
           </Text>
         </View>
       </View>
-      <View style={[s.teachTimerBlock, compactTeachingView && s.teachTimerBlockCompact]}>
-        <View style={s.teachTimerHeading}>
-          <Text style={s.label}>{held ? "PAUSED" : "TIME REMAINING"}</Text>
-          <Text style={s.teachStepLabel}>
-            Step {index + 1} of {movements.length}
-          </Text>
-        </View>
-        <View style={s.teachTimerRow}>
-          <Text style={[s.teachTimer, compactTeachingView && s.teachTimerCompact]}>{fmt(moveTime)}</Text>
-          <Text style={s.teachTimerTotal}>of {fmt(current.duration)}</Text>
-        </View>
-        <View style={s.teachTimerTrack}>
-          <View
-            style={[
-              s.teachTimerFill,
-              { width: `${movementProgress * 100}%` },
-            ]}
-          />
-        </View>
+      <View style={s.teachStepHeading}>
+        <Text style={s.label}>{held ? "CLASS PAUSED" : "CLASS IN PROGRESS"}</Text>
+        <Text style={s.teachStepLabel}>
+          Step {index + 1} of {movements.length}
+        </Text>
       </View>
       <Animated.View
         style={[
@@ -5056,7 +5329,7 @@ function TeachingSession({
           <ChevronRight size={20} color={C.rose} />
         )}
       </Pressable>
-      <Pressable onPress={confirmEnd} style={s.endClass} accessibilityRole="button">
+      <Pressable onPress={confirmEnd} style={s.endClass} accessibilityRole="button" accessibilityLabel="End class">
         <Text style={[s.stepLabel, s.endClassText]}>End Class</Text>
       </Pressable>
       </View>
@@ -5138,9 +5411,9 @@ function BlushBodiesApp() {
       vibration: true,
       countdownSound: false,
       completionSound: true,
-      offline: false,
     });
   const [signedIn, setSignedIn] = useState(false);
+  const [authReady, setAuthReady] = useState(!supabaseConfigured);
   const [resetEmail, setResetEmail] = useState("");
   const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "error">(
     "saved",
@@ -5148,17 +5421,35 @@ function BlushBodiesApp() {
   const [persistenceError, setPersistenceError] = useState("");
   const saveChain = useRef<Promise<void>>(Promise.resolve());
   const saveGeneration = useRef(0);
+  const workspaceSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestStoredData = useRef<StoredAppData | null>(null);
+  const remoteWorkspaceId = useRef<string | null>(null);
+  const remoteWorkspaceRevision = useRef(0);
   const backgroundedAt = useRef<number | null>(null);
   useEffect(
     () => () => {
       if (undoTimer.current) clearTimeout(undoTimer.current);
+      if (workspaceSaveTimer.current) clearTimeout(workspaceSaveTimer.current);
+      const latest = latestStoredData.current;
+      if (latest) {
+        saveChain.current = saveChain.current
+          .then(() =>
+            AsyncStorage.setItem(userStorageKey(latest.account), JSON.stringify(latest)),
+          )
+          .catch(() => undefined);
+      }
     },
     [],
   );
   useEffect(() => {
     void AsyncStorage.removeItem(LEGACY_STORAGE_KEY).catch(() => undefined);
   }, []);
+  const saveScheduledClass = (slot: ScheduledClass) => {
+    setSchedule((current) => upsertScheduleSlot(current, slot));
+  };
+  const removeScheduledClass = (id: string) => {
+    setSchedule((current) => removeScheduleSlot(current, id));
+  };
   const storedData = (owner: Account = account): StoredAppData => ({
       account: owner,
       plan,
@@ -5178,29 +5469,49 @@ function BlushBodiesApp() {
     key = userStorageKey(stored.account),
   ) => {
     const generation = ++saveGeneration.current;
-    setSaveStatus("saving");
-    const task = saveChain.current.then(() =>
-      AsyncStorage.setItem(key, JSON.stringify(stored)),
-    );
-    saveChain.current = task.catch(() => undefined);
-    void task.then(() => {
-      if (generation !== saveGeneration.current) return;
-      setPersistenceError("");
-      setSaveStatus("saved");
-    }).catch(() => {
-      if (generation !== saveGeneration.current) return;
-      setPersistenceError(
-        "Your latest changes could not be saved. Keep the app open and try again.",
+    const writeWorkspace = async (storageKey: string, value: string) => {
+      await AsyncStorage.setItem(storageKey, value);
+      if (!remoteWorkspaceId.current) return;
+      const revision = await saveRemoteWorkspaceState(
+        remoteWorkspaceId.current,
+        remoteWorkspaceRevision.current,
+        JSON.parse(value) as StoredAppData,
       );
-      setSaveStatus("error");
+      remoteWorkspaceRevision.current = revision;
+    };
+    const { task, chain } = enqueueWorkspaceSave({
+      previous: saveChain.current,
+      write: writeWorkspace,
+      key,
+      value: JSON.stringify(stored),
+      generation,
+      latestGeneration: () => saveGeneration.current,
+      updateStatus: (status) => {
+        setSaveStatus(status);
+        if (status === "saved") setPersistenceError("");
+        if (status === "error")
+          setPersistenceError(
+            "Your latest changes could not be saved. Keep the app open and try again.",
+          );
+      },
     });
+    saveChain.current = chain;
     return task;
   };
   useEffect(() => {
     if (!signedIn) return;
     const stored = storedData();
     latestStoredData.current = stored;
-    void queueWorkspaceSave(stored).catch(() => undefined);
+    if (workspaceSaveTimer.current) clearTimeout(workspaceSaveTimer.current);
+    setSaveStatus("saving");
+    workspaceSaveTimer.current = setTimeout(() => {
+      workspaceSaveTimer.current = null;
+      void queueWorkspaceSave(stored).catch(() => undefined);
+    }, 300);
+    return () => {
+      if (workspaceSaveTimer.current) clearTimeout(workspaceSaveTimer.current);
+      workspaceSaveTimer.current = null;
+    };
   }, [
     signedIn,
     account,
@@ -5224,6 +5535,7 @@ function BlushBodiesApp() {
     if (Platform.OS === "web") return;
     const subscription = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
+        if (supabase) void supabase.auth.startAutoRefresh();
         if (
           signedIn &&
           !activeTeachingSession &&
@@ -5235,6 +5547,14 @@ function BlushBodiesApp() {
         }
         backgroundedAt.current = null;
         return;
+      }
+      if (supabase) void supabase.auth.stopAutoRefresh();
+      if (workspaceSaveTimer.current) {
+        clearTimeout(workspaceSaveTimer.current);
+        workspaceSaveTimer.current = null;
+        const latest = latestStoredData.current;
+        if (signedIn && latest)
+          void queueWorkspaceSave(latest).catch(() => undefined);
       }
       backgroundedAt.current ??= Date.now();
     });
@@ -5276,30 +5596,22 @@ function BlushBodiesApp() {
     if (saved.brief.scheduledDate && saved.brief.scheduledTime) {
       const scheduledDate = saved.brief.scheduledDate;
       const scheduledTime = saved.brief.scheduledTime;
-      setSchedule((current) => {
-        const matching = current.find(
-          (slot) =>
-            slot.date === scheduledDate &&
-            slot.time === scheduledTime &&
-            slot.status !== "CANCELLED",
-        );
-        const scheduled: ScheduledClass = {
-          id:
-            matching?.id ??
-            `slot-${scheduledDate}-${scheduledTime.replace(":", "")}`,
-          date: scheduledDate,
-          time: scheduledTime,
-          level: planLevel(saved),
-          lesson: `${saved.brief.week} / ${saved.brief.day}`,
-          status: "READY",
-          planId: saved.id,
-        };
-        return [
-          ...current.filter((slot) => slot.id !== matching?.id),
-          scheduled,
-        ].sort((a, b) =>
-          `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`),
-        );
+      const matching = schedule.find(
+        (slot) =>
+          slot.date === scheduledDate &&
+          slot.time === scheduledTime &&
+          slot.status !== "CANCELLED",
+      );
+      saveScheduledClass({
+        id:
+          matching?.id ??
+          `slot-${scheduledDate}-${scheduledTime.replace(":", "")}`,
+        date: scheduledDate,
+        time: scheduledTime,
+        level: planLevel(saved),
+        lesson: `${saved.brief.week} / ${saved.brief.day}`,
+        status: "READY",
+        planId: saved.id,
       });
       setAssignmentSlotId(undefined);
     }
@@ -5466,11 +5778,7 @@ function BlushBodiesApp() {
     setSequenceHistory([]);
     setSequenceNotice("");
     setSchedule((current) =>
-      current.map((slot) =>
-        slot.id === slotId
-          ? { ...slot, status: "READY", planId: selectedPlan.id }
-          : slot,
-      ),
+      assignSchedulePlan(current, slotId, selectedPlan.id),
     );
     setPlan(selectedPlan);
     if (targetSlot) setHomeDate(targetSlot.date);
@@ -5491,11 +5799,7 @@ function BlushBodiesApp() {
       status: "READY",
       planId: plan.id,
     };
-    setSchedule((current) =>
-      [...current, slot].sort((a, b) =>
-        `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`),
-      ),
-    );
+    saveScheduledClass(slot);
     setHomeDate(date);
     setHasActiveDraft(false);
     setAssignmentSlotId(undefined);
@@ -5578,11 +5882,7 @@ function BlushBodiesApp() {
     setHasActiveDraft(false);
     if (scheduledClassId) {
       setSchedule((current) =>
-        current.map((slot) =>
-          slot.id === scheduledClassId
-            ? { ...slot, status: "IN PROGRESS" }
-            : slot,
-        ),
+        setScheduleStatus(current, scheduledClassId, "IN PROGRESS"),
       );
     }
     setScreen("teach");
@@ -5610,12 +5910,17 @@ function BlushBodiesApp() {
     }
     beginTeachingSession(assignedPlan, slot.id);
   };
-  const toggleFavourite = (id: string) =>
+  const toggleFavourite = useCallback((id: string) =>
     setFavourites((current) =>
       current.includes(id)
         ? current.filter((item) => item !== id)
         : [...current, id],
-    );
+    ), []);
+  const openLibraryMovement = useCallback((movement: LibraryMovement) => {
+    setLibraryNotice("");
+    setSelectedMovement(movement);
+    setScreen("details");
+  }, []);
   const changeSequence = (movements: PlanMovement[], mode?: SequenceMode) => {
     setSequenceHistory((history) => [...history.slice(-19), plan]);
     setPlan(updatePlanSequence(plan, movements, mode));
@@ -5640,15 +5945,41 @@ function BlushBodiesApp() {
   };
   const saveCustomMovement = (movement: LibraryMovement) => {
     const reviewed = { ...movement, reviewedBy: account.name, reviewedAt: Date.now() };
-    setLibraryMovements((current) => [reviewed, ...current.filter((item) => item.id !== movement.id)]);
+    const previousImageUri = libraryMovements.find(
+      (item) => item.id === movement.id,
+    )?.imageUri;
+    const nextLibraryMovements = [
+      reviewed,
+      ...libraryMovements.filter((item) => item.id !== movement.id),
+    ];
+    const nextPlan = syncMovementImage(plan, movement.id, movement.imageUri);
+    const nextSavedPlans = savedPlans.map((saved) =>
+      syncMovementImage(saved, movement.id, movement.imageUri));
+    const nextActiveTeachingSession = activeTeachingSession ? {
+      ...activeTeachingSession,
+      plan: syncMovementImage(
+        activeTeachingSession.plan,
+        movement.id,
+        movement.imageUri,
+      ),
+    } : undefined;
+    setLibraryMovements(nextLibraryMovements);
     setDeletedMovementIds((current) => current.filter((id) => id !== movement.id));
-    setPlan((current) => syncMovementImage(current, movement.id, movement.imageUri));
-    setSavedPlans((current) => current.map((saved) =>
-      syncMovementImage(saved, movement.id, movement.imageUri)));
-    setActiveTeachingSession((current) => current ? {
-      ...current,
-      plan: syncMovementImage(current.plan, movement.id, movement.imageUri),
-    } : current);
+    setPlan(nextPlan);
+    setSavedPlans(nextSavedPlans);
+    setActiveTeachingSession(nextActiveTeachingSession);
+    if (previousImageUri && previousImageUri !== movement.imageUri) {
+      const references = referencedMovementImageUris({
+        libraryMovements: nextLibraryMovements,
+        currentPlan: nextPlan,
+        savedPlans: nextSavedPlans,
+        activePlan: nextActiveTeachingSession?.plan,
+        sequenceHistory,
+        recentlyDeleted: pruneRecentlyDeleted(recentlyDeleted),
+      });
+      if (!references.has(previousImageUri))
+        void deleteOwnedMovementImage(previousImageUri);
+    }
     setSelectedMovement(reviewed);
     setMovementToReview(undefined);
     setLibraryNotice(`${movement.name} saved to the library.`);
@@ -5760,11 +6091,7 @@ function BlushBodiesApp() {
   };
   const cancelScheduledClass = (scheduledClass: ScheduledClass) => {
     setSchedule((current) =>
-      current.map((slot) =>
-        slot.id === scheduledClass.id
-          ? { ...slot, status: "CANCELLED" }
-          : slot,
-      ),
+      setScheduleStatus(current, scheduledClass.id, "CANCELLED"),
     );
     showUndo({
       kind: "cancelled",
@@ -5780,11 +6107,7 @@ function BlushBodiesApp() {
       restoreDeletedItem(undo.item);
       return;
     }
-    setSchedule((current) =>
-      current.map((slot) =>
-        slot.id === undo.scheduledClass.id ? undo.scheduledClass : slot,
-      ),
-    );
+    saveScheduledClass(undo.scheduledClass);
   };
   const createDefaultPlan = (library = libraryMovements) =>
     createPlan({
@@ -5795,6 +6118,24 @@ function BlushBodiesApp() {
       energy: "Flowing",
       equipment: ["Mat"],
     }, library);
+  const freshWorkspaceData = (owner: Account): StoredAppData => ({
+    account: owner,
+    plan: createDefaultPlan(initialLibrary),
+    hasActiveDraft: true,
+    savedPlans: [],
+    sessionHistory: [],
+    schedule: initialSchedule,
+    libraryMovements: initialLibrary,
+    deletedMovementIds: [],
+    recentlyDeleted: [],
+    favourites: ["manual-clam", "manual-shoulder-bridge"],
+    instructorPreferences: {
+      teachingMode: "Guided",
+      vibration: true,
+      countdownSound: false,
+      completionSound: true,
+    },
+  });
   const resetWorkspace = (owner: Account) => {
     setEditorPhase("All");
     setSequenceHistory([]);
@@ -5822,7 +6163,6 @@ function BlushBodiesApp() {
       vibration: true,
       countdownSound: false,
       completionSound: true,
-      offline: false,
     });
   };
   const loadWorkspace = async (owner: Account) => {
@@ -5836,60 +6176,152 @@ function BlushBodiesApp() {
       resetWorkspace(owner);
       return;
     }
-    const stored = JSON.parse(raw) as Partial<StoredAppData>;
-    setAccount({
-      ...owner,
-      name: stored.account?.name ?? owner.name,
-      phone: stored.account?.phone,
-    });
-    setHasActiveDraft(
-      stored.hasActiveDraft ?? (stored.plan ? stored.plan.status === "draft" : true),
-    );
-    setSavedPlans(stored.savedPlans ?? []);
-    setSessionResult(null);
-    setSelectedSession(null);
-    setSessionHistory(stored.sessionHistory ?? []);
-    setActiveTeachingSession(
-      stored.activeTeachingSession?.plan.movements.length
-        ? stored.activeTeachingSession
-        : undefined,
-    );
-    setSchedule(
-      (stored.schedule ?? initialSchedule).map((slot) => ({
-        ...slot,
-        date: slot.date ?? localDateKey(),
-      })),
-    );
-    const removedMovementIds = stored.deletedMovementIds ?? [];
-    const retainedDeletedItems = pruneRecentlyDeleted(
-      stored.recentlyDeleted ?? [],
-    );
-    const mergedLibrary = mergeLibraryCatalog(
-      initialLibrary,
-      stored.libraryMovements ?? [],
-      removedMovementIds,
-      retiredMovementIds,
-    );
-    setPlan(stored.plan ?? createDefaultPlan(mergedLibrary));
-    setDeletedMovementIds(removedMovementIds);
-    setRecentlyDeleted(retainedDeletedItems);
-    setRecentlyDeletedNotice("");
-    setLibraryMovements(mergedLibrary);
-    setFavourites(
-      (stored.favourites ?? ["manual-clam", "manual-shoulder-bridge"]).filter(
-        (id) => mergedLibrary.some((movement) => movement.id === id),
-      ),
-    );
-    setSelectedMovement(mergedLibrary[0] ?? initialLibrary[0]);
-    setInstructorPreferences({
-        teachingMode: "Guided",
-        vibration: true,
-        countdownSound: false,
-        completionSound: true,
-        offline: false,
-        ...stored.instructorPreferences,
+    try {
+      const stored = JSON.parse(raw) as Partial<StoredAppData>;
+      setAccount({
+        ...owner,
+        name: stored.account?.name ?? owner.name,
+        phone: stored.account?.phone,
       });
+      setHasActiveDraft(
+        stored.hasActiveDraft ?? (stored.plan ? stored.plan.status === "draft" : true),
+      );
+      setSavedPlans(stored.savedPlans ?? []);
+      setSessionResult(null);
+      setSelectedSession(null);
+      setSessionHistory(stored.sessionHistory ?? []);
+      setActiveTeachingSession(
+        isRecoverableTeachingSession(stored.activeTeachingSession)
+          ? stored.activeTeachingSession
+          : undefined,
+      );
+      setSchedule(
+        (stored.schedule ?? initialSchedule).map((slot) => ({
+          ...slot,
+          date: slot.date ?? localDateKey(),
+        })),
+      );
+      const removedMovementIds = stored.deletedMovementIds ?? [];
+      const retainedDeletedItems = pruneRecentlyDeleted(
+        stored.recentlyDeleted ?? [],
+      );
+      const mergedLibrary = mergeLibraryCatalog(
+        initialLibrary,
+        stored.libraryMovements ?? [],
+        removedMovementIds,
+        retiredMovementIds,
+      );
+      setPlan(stored.plan ?? createDefaultPlan(mergedLibrary));
+      setDeletedMovementIds(removedMovementIds);
+      setRecentlyDeleted(retainedDeletedItems);
+      setRecentlyDeletedNotice("");
+      setLibraryMovements(mergedLibrary);
+      setFavourites(
+        (stored.favourites ?? ["manual-clam", "manual-shoulder-bridge"]).filter(
+          (id) => mergedLibrary.some((movement) => movement.id === id),
+        ),
+      );
+      setSelectedMovement(mergedLibrary[0] ?? initialLibrary[0]);
+      setInstructorPreferences({
+          teachingMode: "Guided",
+          vibration: true,
+          countdownSound: false,
+          completionSound: true,
+          ...stored.instructorPreferences,
+        });
+    } catch {
+      await AsyncStorage.setItem(
+        `${WORKSPACE_RECOVERY_PREFIX}${owner.role}/${owner.email.toLowerCase()}/${Date.now()}`,
+        raw,
+      ).catch(() => undefined);
+      resetWorkspace(owner);
+      Alert.alert(
+        "Workspace recovered",
+        "Saved data could not be opened, so a fresh workspace was created. You can restore a backup from Profile > App Data.",
+      );
+    }
   };
+  const connectRemoteAccount = async (user: {
+    email?: string | null;
+    user_metadata?: Record<string, unknown>;
+  }) => {
+    if (!user.email) throw new Error("The signed-in account has no email address.");
+    const fullName = user.user_metadata?.full_name;
+    const owner: Account = {
+      name:
+        typeof fullName === "string" && fullName.trim()
+          ? fullName.trim()
+          : user.email.split("@")[0],
+      email: user.email.toLowerCase(),
+      role: "instructor",
+    };
+    const workspaces = await listRemoteWorkspaces();
+    const workspace = workspaces[0];
+    if (!workspace)
+      throw new Error(
+        "No Supabase workspace was found. Apply the database migration and try again.",
+      );
+    const remote = await loadRemoteWorkspaceState<Partial<StoredAppData>>(
+      workspace.id,
+    );
+    remoteWorkspaceId.current = workspace.id;
+    remoteWorkspaceRevision.current = remote.revision;
+    const remoteHasData =
+      remote.data &&
+      typeof remote.data === "object" &&
+      "account" in remote.data &&
+      "plan" in remote.data;
+    const key = userStorageKey(owner);
+    if (remoteHasData) {
+      await AsyncStorage.setItem(key, JSON.stringify(remote.data));
+    } else {
+      const local = await AsyncStorage.getItem(key);
+      const initial = local
+        ? (JSON.parse(local) as StoredAppData)
+        : freshWorkspaceData(owner);
+      await AsyncStorage.setItem(key, JSON.stringify(initial));
+      remoteWorkspaceRevision.current = await saveRemoteWorkspaceState(
+        workspace.id,
+        remote.revision,
+        initial,
+      );
+    }
+    await loadWorkspace(owner);
+    setSignedIn(true);
+    setTab("home");
+    setScreen("home");
+  };
+  useEffect(() => {
+    if (!supabaseConfigured || !supabase) return;
+    let active = true;
+    void supabase.auth
+      .getSession()
+      .then(async ({ data, error }) => {
+        if (error) throw error;
+        if (active && data.session?.user)
+          await connectRemoteAccount(data.session.user);
+      })
+      .catch(() => {
+        if (active) {
+          remoteWorkspaceId.current = null;
+          remoteWorkspaceRevision.current = 0;
+        }
+      })
+      .finally(() => {
+        if (active) setAuthReady(true);
+      });
+    const { data: authListener } = supabase.auth.onAuthStateChange((event) => {
+      if (event !== "SIGNED_OUT") return;
+      remoteWorkspaceId.current = null;
+      remoteWorkspaceRevision.current = 0;
+      setSignedIn(false);
+      setScreen("welcome");
+    });
+    return () => {
+      active = false;
+      authListener.subscription.unsubscribe();
+    };
+  }, []);
   const authenticate = async (
     chosen: Role,
     email: string,
@@ -5900,6 +6332,22 @@ function BlushBodiesApp() {
     if (attempt?.blockedUntil && attempt.blockedUntil > Date.now())
       return signInBlockedMessage(attempt.blockedUntil);
     try {
+      if (supabaseConfigured) {
+        const client = requireSupabase();
+        const { data, error } = await client.auth.signInWithPassword({
+          email,
+          password,
+        });
+        if (error || !data.user) {
+          const blockedUntil = recordSignInFailure(attemptKey);
+          return blockedUntil
+            ? signInBlockedMessage(blockedUntil)
+            : error?.message ?? "The email or password is incorrect.";
+        }
+        signInAttempts.delete(attemptKey);
+        await connectRemoteAccount(data.user);
+        return null;
+      }
       const credentials = await readCredentials();
       const credential = credentials.find(
         (item) => item.role === chosen && item.email === email,
@@ -5928,6 +6376,8 @@ function BlushBodiesApp() {
     }
   };
   const openDemoWorkspace = async () => {
+    remoteWorkspaceId.current = null;
+    remoteWorkspaceRevision.current = 0;
     try {
       await loadWorkspace(DEMO_ACCOUNT);
     } catch {
@@ -5944,6 +6394,30 @@ function BlushBodiesApp() {
     const passwordError = passwordValidationError(password);
     if (passwordError) return passwordError;
     try {
+      if (supabaseConfigured) {
+        const client = requireSupabase();
+        const { data, error } = await client.auth.signUp({
+          email: newAccount.email,
+          password,
+          options: {
+            data: {
+              full_name: newAccount.name,
+              workspace_name: "Blush Bodies",
+            },
+          },
+        });
+        if (error) return error.message;
+        if (!data.session || !data.user) {
+          Alert.alert(
+            "Confirm your email",
+            "Open the verification email from Supabase, then return here and sign in.",
+          );
+          setScreen("signin");
+          return null;
+        }
+        await connectRemoteAccount(data.user);
+        return null;
+      }
       const credentials = await readCredentials();
       if (
         credentials.some(
@@ -5976,6 +6450,16 @@ function BlushBodiesApp() {
     const passwordError = passwordValidationError(newPassword);
     if (passwordError) return passwordError;
     try {
+      if (supabaseConfigured) {
+        const client = requireSupabase();
+        const { error: verificationError } = await client.auth.signInWithPassword({
+          email: account.email,
+          password: currentPassword,
+        });
+        if (verificationError) return "The current password is incorrect.";
+        const { error } = await client.auth.updateUser({ password: newPassword });
+        return error?.message ?? null;
+      }
       const credentials = await readCredentials();
       const credentialIndex = credentials.findIndex(
         (credential) =>
@@ -6042,6 +6526,39 @@ function BlushBodiesApp() {
     const nextKey = userStorageKey(nextAccount);
     try {
       await saveChain.current;
+      if (supabaseConfigured) {
+        const client = requireSupabase();
+        const { data, error } = await client.auth.updateUser({
+          email: nextAccount.email,
+          data: { full_name: nextAccount.name },
+        });
+        if (error) return error.message;
+        if (!data.user) return "Account details could not be saved.";
+        const { error: profileError } = await client
+          .from("profiles")
+          .update({ full_name: nextAccount.name, updated_at: new Date().toISOString() })
+          .eq("id", data.user.id);
+        if (profileError) return profileError.message;
+        const savedAccount: Account = {
+          ...nextAccount,
+          email: data.user.email?.toLowerCase() ?? previous.email,
+        };
+        const saved = storedData(savedAccount);
+        const savedKey = userStorageKey(savedAccount);
+        await AsyncStorage.setItem(savedKey, JSON.stringify(saved));
+        if (savedKey !== oldKey)
+          await AsyncStorage.removeItem(oldKey).catch(() => undefined);
+        latestStoredData.current = saved;
+        setAccount(savedAccount);
+        setPersistenceError("");
+        setSaveStatus("saved");
+        if (savedAccount.email !== nextAccount.email)
+          Alert.alert(
+            "Confirm your new email",
+            "Supabase sent confirmation links. Your current email remains active until the change is confirmed.",
+          );
+        return null;
+      }
       const credentials = await readCredentials();
       const credentialIndex = credentials.findIndex(
         (credential) =>
@@ -6089,6 +6606,12 @@ function BlushBodiesApp() {
     const stored = latestStoredData.current ?? storedData();
     try {
       await queueWorkspaceSave(stored);
+      if (supabaseConfigured) {
+        const { error } = await requireSupabase().auth.signOut();
+        if (error) throw error;
+        remoteWorkspaceId.current = null;
+        remoteWorkspaceRevision.current = 0;
+      }
       setSessionResult(null);
       setSignedIn(false);
       setScreen("welcome");
@@ -6099,10 +6622,166 @@ function BlushBodiesApp() {
       );
     }
   };
+  const backupWorkspaceData = async (
+    workspace: StoredAppData,
+  ): Promise<WorkspaceBackupData> => {
+    const libraryMovements = await Promise.all(
+      workspace.libraryMovements.map(async (movement) => {
+        const imageUri = movement.imageUri;
+        if (
+          !imageUri ||
+          imageUri.startsWith("data:") ||
+          !FileSystem.documentDirectory ||
+          !imageUri.startsWith(FileSystem.documentDirectory)
+        )
+          return movement;
+        try {
+          const fileName =
+            imageUri.split("/").pop()?.split(/[?#]/)[0] ??
+            `${movement.id}.jpg`;
+          const base64 = await FileSystem.readAsStringAsync(imageUri, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
+          return { ...movement, backupImage: { fileName, base64 } };
+        } catch {
+          return movement;
+        }
+      }),
+    );
+    return { ...workspace, libraryMovements };
+  };
+  const restoreWorkspaceData = async (
+    workspace: WorkspaceBackupData,
+  ): Promise<StoredAppData> => {
+    const libraryMovements = await Promise.all(
+      workspace.libraryMovements.map(async (movement, index) => {
+        const { backupImage, ...restored } = movement;
+        if (!backupImage || !FileSystem.documentDirectory) return restored;
+        try {
+          const directory = `${FileSystem.documentDirectory}movement-images/`;
+          await FileSystem.makeDirectoryAsync(directory, { intermediates: true });
+          const safeName = safeBackupImageFileName(
+            backupImage.fileName,
+            movement.id,
+          );
+          const destination = `${directory}${Date.now()}-${index}-${safeName}`;
+          await FileSystem.writeAsStringAsync(destination, backupImage.base64, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
+          return { ...restored, imageUri: destination };
+        } catch {
+          return restored;
+        }
+      }),
+    );
+    return { ...workspace, libraryMovements };
+  };
+  const exportWorkspaceBackup = async () => {
+    try {
+      if (!FileSystem.cacheDirectory)
+        throw new Error("Backup file storage is unavailable.");
+      if (!(await Sharing.isAvailableAsync()))
+        throw new Error("File sharing is unavailable on this device.");
+      const workspace = await backupWorkspaceData(
+        latestStoredData.current ?? storedData(),
+      );
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const path = `${FileSystem.cacheDirectory}blush-bodies-backup-${timestamp}.json`;
+      await FileSystem.writeAsStringAsync(
+        path,
+        JSON.stringify(
+          createWorkspaceBackupEnvelope(workspace),
+          null,
+          2,
+        ),
+        { encoding: FileSystem.EncodingType.UTF8 },
+      );
+      await Sharing.shareAsync(path, {
+        dialogTitle: "Save Blush Bodies backup",
+        mimeType: "application/json",
+        UTI: "public.json",
+      });
+    } catch (error) {
+      Alert.alert(
+        "Backup unavailable",
+        error instanceof Error
+          ? error.message
+          : "The workspace backup could not be created. Please try again.",
+      );
+    }
+  };
+  const restoreWorkspaceBackup = async () => {
+    try {
+      const selection = await DocumentPicker.getDocumentAsync({
+        type: "application/json",
+        multiple: false,
+        copyToCacheDirectory: true,
+      });
+      if (selection.canceled) return;
+      const asset = selection.assets[0];
+      if (!asset) throw new Error("No backup file was selected.");
+      const workspace = parseWorkspaceBackup<WorkspaceBackupData>(
+        await FileSystem.readAsStringAsync(asset.uri, {
+          encoding: FileSystem.EncodingType.UTF8,
+        }),
+        account,
+      );
+      confirmAction({
+        title: "Restore this backup?",
+        message:
+          "Current plans, classes, sessions and library changes on this device will be replaced.",
+        confirmText: "Restore backup",
+        destructive: true,
+        onConfirm: () => {
+          void (async () => {
+            const key = userStorageKey(account);
+            let previousWorkspace: string | null = null;
+            try {
+              await saveChain.current;
+              previousWorkspace = await AsyncStorage.getItem(key);
+              const restored = await restoreWorkspaceData(
+                workspace,
+              );
+              await AsyncStorage.setItem(
+                key,
+                JSON.stringify(restored),
+              );
+              await loadWorkspace(account);
+              Alert.alert("Backup restored", "Your workspace is ready to use.");
+            } catch {
+              if (previousWorkspace === null)
+                await AsyncStorage.removeItem(key).catch(() => undefined);
+              else
+                await AsyncStorage.setItem(key, previousWorkspace).catch(
+                  () => undefined,
+                );
+              Alert.alert(
+                "Restore unavailable",
+                "The backup could not be restored. Your current workspace was not changed.",
+              );
+            }
+          })();
+        },
+      });
+    } catch (error) {
+      Alert.alert(
+        "Backup unavailable",
+        error instanceof Error
+          ? error.message
+          : "The backup could not be opened. Please try again.",
+      );
+    }
+  };
   const resetAppData = async () => {
     try {
       await saveChain.current;
       await AsyncStorage.removeItem(userStorageKey(account));
+      if (supabaseConfigured) {
+        const { error } = await requireSupabase().auth.signOut();
+        if (error) throw error;
+        remoteWorkspaceId.current = null;
+        remoteWorkspaceRevision.current = 0;
+      } else {
       const credentials = await readCredentials();
       await writeCredentials(
         credentials.filter(
@@ -6110,9 +6789,10 @@ function BlushBodiesApp() {
             !(
               credential.role === account.role &&
               credential.email === account.email
-            ),
+          ),
         ),
       );
+      }
       signInAttempts.delete(signInAttemptKey(account.role, account.email));
       latestStoredData.current = null;
       resetWorkspace({
@@ -6131,6 +6811,13 @@ function BlushBodiesApp() {
     }
   };
   const recentlyDeletedCount = pruneRecentlyDeleted(recentlyDeleted).length;
+  if (!authReady)
+    return (
+      <View style={[s.flex, s.authLoading]}>
+        <Text style={s.brandTitle}>BLUSH BODIES</Text>
+        <Text style={s.sub}>Opening your workspace...</Text>
+      </View>
+    );
   if (screen === "welcome")
     return (
       <Welcome
@@ -6147,9 +6834,11 @@ function BlushBodiesApp() {
     return (
       <SignIn
         role="instructor"
-        allowSandboxReset={ALLOW_SANDBOX_PASSWORD_RESET}
+        allowSandboxReset={ALLOW_SANDBOX_PASSWORD_RESET && !supabaseConfigured}
         openDemo={
-          ALLOW_SANDBOX_PASSWORD_RESET ? openDemoWorkspace : undefined
+          ALLOW_SANDBOX_PASSWORD_RESET && !supabaseConfigured
+            ? openDemoWorkspace
+            : undefined
         }
         back={() => setScreen("welcome")}
         signup={() => {
@@ -6195,11 +6884,7 @@ function BlushBodiesApp() {
           setActiveTeachingSession(undefined);
           if (result.scheduledClassId) {
             setSchedule((current) =>
-              current.map((slot) =>
-                slot.id === result.scheduledClassId
-                  ? { ...slot, status: "COMPLETED" }
-                  : slot,
-              ),
+              setScheduleStatus(current, result.scheduledClassId!, "COMPLETED"),
             );
           }
           setSessionResult(result);
@@ -6287,19 +6972,12 @@ function BlushBodiesApp() {
           }}
           save={(slot) => {
             const returnHome = Boolean(scheduleEditId);
-            setSchedule((current) =>
-              [...current.filter((item) => item.id !== slot.id), slot].sort(
-                (a, b) =>
-                  `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`),
-              ),
-            );
+            saveScheduledClass(slot);
             setScheduleEditId(undefined);
             if (returnHome) setScreen("home");
             else if (scheduleReturnScreen === "assign") setScreen("assign");
           }}
-          remove={(id) =>
-            setSchedule((current) => current.filter((slot) => slot.id !== id))
-          }
+          remove={removeScheduledClass}
           cancel={cancelScheduledClass}
         />
         {pendingUndo ? (
@@ -6366,7 +7044,10 @@ function BlushBodiesApp() {
             ).length
           }
           back={() => setScreen("profile")}
+          backup={exportWorkspaceBackup}
+          restoreBackup={restoreWorkspaceBackup}
           reset={resetAppData}
+          sharedWorkspace={supabaseConfigured}
         />
       </View>
     );
@@ -6549,11 +7230,7 @@ function BlushBodiesApp() {
             movements={libraryMovements}
             favourites={favourites}
             notice={libraryNotice}
-            open={(movement) => {
-              setLibraryNotice("");
-              setSelectedMovement(movement);
-              setScreen("details");
-            }}
+            open={openLibraryMovement}
             create={() => {
               setLibraryNotice("");
               setMovementToReview(undefined);
@@ -6645,7 +7322,7 @@ const s = StyleSheet.create({
     width: "100%",
     minWidth: 0,
     backgroundColor: Platform.OS === "web" ? "#EDE7E5" : C.bg,
-    alignItems: Platform.OS === "web" ? "center" : "stretch",
+    alignItems: "center",
     overflow: "hidden",
   },
   appViewport: {
@@ -6676,6 +7353,7 @@ const s = StyleSheet.create({
   },
   brand: { alignItems: "center", gap: 10 },
   brandTitle: { color: C.rose, fontSize: 14, fontWeight: "800" },
+  authLoading: { alignItems: "center", justifyContent: "center", gap: 10 },
   brandSub: { color: C.muted, fontSize: 11, fontWeight: "800" },
   art: {
     height: 300,
@@ -7523,10 +8201,12 @@ const s = StyleSheet.create({
     paddingHorizontal: 2,
   },
   teachTimerBlockCompact: { paddingVertical: 4 },
-  teachTimerHeading: {
+  teachStepHeading: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    paddingHorizontal: 2,
+    paddingVertical: 8,
   },
   teachStepLabel: { color: C.muted, fontSize: 11, fontWeight: "500" },
   teachTimerRow: {
@@ -7972,20 +8652,39 @@ const s = StyleSheet.create({
     justifyContent: "center",
     gap: 8,
   },
+  backupAction: {
+    minHeight: 68,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#EBC8CC",
+    backgroundColor: "#FFF9F9",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 16,
+  },
+  backupTitle: { color: C.ink, fontSize: 13, fontWeight: "800" },
+  backupCopy: { color: C.muted, fontSize: 11, marginTop: 3 },
+  actionDisabled: { opacity: 0.55 },
   detailDeleteAction: { marginTop: 10 },
   dangerText: { color: "#A34848", fontSize: 13, fontWeight: "800" },
 });
 
 export default function App() {
   const { width } = useWindowDimensions();
-  const webPreviewWidth = Platform.OS === "web" ? Math.min(width, 480) : null;
+  const appWidth =
+    Platform.OS === "web"
+      ? Math.min(width, 480)
+      : width >= 700
+        ? Math.min(width, 680)
+        : null;
   return (
     <SafeAreaProvider>
       <GestureHandlerRootView style={s.appRoot}>
         <View
           style={[
             s.appViewport,
-            webPreviewWidth !== null && { width: webPreviewWidth },
+            appWidth !== null && { width: appWidth },
           ]}
         >
           <BlushBodiesApp />

@@ -2293,7 +2293,7 @@ export const manualMovements: LibraryMovement[] = [
     "cues": [
       "Hinge from the hips toward the extended leg with a long spine; breathe steadily without pulling or bouncing."
     ],
-    "reviewStatus": "reviewed",
+    "reviewStatus": "needs-review",
     "catalogueVersion": "mat-manual-v1",
     "manual": {
       "document": "Mat Pilates Exercise Library",
@@ -2334,7 +2334,7 @@ export const manualMovements: LibraryMovement[] = [
     "cues": [
       "Rest in cactus arms and breathe into the ribs for three to five cycles without forcing the arms or arching the lower back."
     ],
-    "reviewStatus": "reviewed",
+    "reviewStatus": "needs-review",
     "catalogueVersion": "mat-manual-v1",
     "manual": {
       "document": "Mat Pilates Exercise Library",

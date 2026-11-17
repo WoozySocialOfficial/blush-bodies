@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   insertMovement, mergeLibraryCatalog, movementSourceId, nextPlanningPhase,
   orderMovementsByPosition, phaseRemaining, phaseTotal, positionGroup,
@@ -9,8 +10,10 @@ import {
 import { additionalMovements, retiredMovementIds } from "../src/catalogue.ts";
 import { createCataloguePlan, replaceCatalogueMovement } from "../src/cataloguePlanning.ts";
 import {
-  filterSchedule, isFutureScheduleSlot, nextAvailableClassSlot, rescheduleSlot,
-  scheduleSlotsOverlap, scheduleTimeOptions,
+  assignSchedulePlan, filterSchedule, isFutureScheduleSlot,
+  nextAvailableClassSlot, removeScheduleSlot, rescheduleSlot,
+  scheduleSlotsOverlap, scheduleTimeOptions, setScheduleStatus,
+  upsertScheduleSlot,
 } from "../src/scheduling.ts";
 import {
   classCalendarDates, classCalendarIcs, googleCalendarUrl,
@@ -19,6 +22,17 @@ import {
   RECENTLY_DELETED_RETENTION_DAYS, pruneRecentlyDeleted,
   recentlyDeletedDaysRemaining, restoreScheduleAssignments,
 } from "../src/recentlyDeleted.ts";
+import {
+  countdownCueSecond, isRecoverableTeachingSession, recoverTeachingPosition,
+} from "../src/teaching.ts";
+import { enqueueWorkspaceSave } from "../src/workspacePersistence.ts";
+import {
+  createWorkspaceBackupEnvelope, parseWorkspaceBackup,
+  safeBackupImageFileName, WorkspaceBackupError,
+} from "../src/workspaceBackup.ts";
+import {
+  isOwnedMovementImageUri, referencedMovementImageUris,
+} from "../src/movementImages.ts";
 
 const movement = (id, position = "Standing", phase = "Main", duration = MOVEMENT_DURATION_SECONDS) => ({
   id, title: id, position, phase, duration, cue: "Test cue",
@@ -34,6 +48,100 @@ const plan = (movements = [], options = {}) => ({
   movements, ...options,
 });
 const ids = (moves) => moves.map((move) => move.id);
+
+const backupWorkspace = (overrides = {}) => ({
+  account: { name: "Instructor", email: "coach@example.com", role: "instructor" },
+  plan: plan(),
+  hasActiveDraft: true,
+  savedPlans: [],
+  sessionHistory: [],
+  schedule: [],
+  libraryMovements: [],
+  deletedMovementIds: [],
+  recentlyDeleted: [],
+  favourites: [],
+  instructorPreferences: {
+    teachingMode: "Guided", vibration: true,
+    countdownSound: false, completionSound: true,
+  },
+  ...overrides,
+});
+
+test("workspace backups round-trip only for the signed-in account", () => {
+  const workspace = backupWorkspace();
+  const raw = JSON.stringify(createWorkspaceBackupEnvelope(workspace));
+  assert.deepEqual(
+    parseWorkspaceBackup(raw, { email: "COACH@example.com", role: "instructor" }),
+    workspace,
+  );
+});
+
+test("workspace backup validation rejects unreadable and unsupported files", () => {
+  assert.throws(
+    () => parseWorkspaceBackup("not-json", { email: "coach@example.com", role: "instructor" }),
+    (error) => error instanceof WorkspaceBackupError && error.code === "invalid-json",
+  );
+  assert.throws(
+    () => parseWorkspaceBackup(JSON.stringify({ format: "other", version: 99 }), {
+      email: "coach@example.com", role: "instructor",
+    }),
+    (error) => error instanceof WorkspaceBackupError && error.code === "unsupported",
+  );
+});
+
+test("workspace backup validation rejects damaged and wrong-account data", () => {
+  const damaged = createWorkspaceBackupEnvelope(backupWorkspace({ schedule: {} }));
+  assert.throws(
+    () => parseWorkspaceBackup(JSON.stringify(damaged), {
+      email: "coach@example.com", role: "instructor",
+    }),
+    (error) => error instanceof WorkspaceBackupError && error.code === "invalid-workspace",
+  );
+  const anotherAccount = createWorkspaceBackupEnvelope(backupWorkspace({
+    account: { name: "Other", email: "other@example.com", role: "instructor" },
+  }));
+  assert.throws(
+    () => parseWorkspaceBackup(JSON.stringify(anotherAccount), {
+      email: "coach@example.com", role: "instructor",
+    }),
+    (error) => error instanceof WorkspaceBackupError && error.code === "wrong-account",
+  );
+});
+
+test("restored movement image names cannot escape their storage directory", () => {
+  assert.equal(safeBackupImageFileName("../../photo.jpg", "move-one"), "-.-photo.jpg");
+  assert.equal(safeBackupImageFileName("...", "move one"), "move-one.jpg");
+});
+
+test("movement image cleanup preserves every live and recoverable reference", () => {
+  const uri = (name) => `file:///documents/movement-images/${name}.jpg`;
+  const references = referencedMovementImageUris({
+    libraryMovements: [{ imageUri: uri("library") }],
+    currentPlan: { movements: [{ imageUri: uri("draft") }] },
+    savedPlans: [{ movements: [{ imageUri: uri("saved") }] }],
+    activePlan: { movements: [{ imageUri: uri("active") }] },
+    sequenceHistory: [{ movements: [{ imageUri: uri("undo") }] }],
+    recentlyDeleted: [
+      { kind: "movement", movement: { imageUri: uri("deleted-movement") } },
+      { kind: "plan", plan: { movements: [{ imageUri: uri("deleted-plan") }] } },
+    ],
+  });
+  assert.deepEqual([...references].sort(), [
+    "active", "deleted-movement", "deleted-plan", "draft",
+    "library", "saved", "undo",
+  ].map(uri).sort());
+});
+
+test("movement image ownership is limited to the app image directory", () => {
+  const root = "file:///documents/";
+  assert.equal(
+    isOwnedMovementImageUri(`${root}movement-images/custom.jpg`, root),
+    true,
+  );
+  assert.equal(isOwnedMovementImageUri(`${root}other/custom.jpg`, root), false);
+  assert.equal(isOwnedMovementImageUri("data:image/jpeg;base64,AA==", root), false);
+  assert.equal(isOwnedMovementImageUri(`${root}movement-images/`, root), false);
+});
 
 test("today's class times begin at the next quarter hour", () => {
   const now = new Date(2026, 9, 2, 16, 42, 0);
@@ -94,6 +202,50 @@ test("rescheduling preserves class assignment data and rejects overlaps", () => 
     ),
     false,
   );
+});
+
+test("scheduled class workflow preserves the plan from assignment through completion", () => {
+  const unsorted = [
+    { id: "later", date: "2026-10-23", time: "12:00", status: "NEEDS PLAN" },
+  ];
+  let schedule = upsertScheduleSlot(unsorted, {
+    id: "class-one",
+    date: "2026-10-22",
+    time: "09:00",
+    status: "NEEDS PLAN",
+  });
+  assert.deepEqual(schedule.map((slot) => slot.id), ["class-one", "later"]);
+
+  schedule = assignSchedulePlan(schedule, "class-one", "plan-one");
+  assert.deepEqual(schedule[0], {
+    id: "class-one",
+    date: "2026-10-22",
+    time: "09:00",
+    status: "READY",
+    planId: "plan-one",
+  });
+
+  schedule = setScheduleStatus(schedule, "class-one", "IN PROGRESS");
+  schedule = setScheduleStatus(schedule, "class-one", "COMPLETED");
+  assert.equal(schedule[0].status, "COMPLETED");
+  assert.equal(schedule[0].planId, "plan-one");
+  assert.deepEqual(removeScheduleSlot(schedule, "later").map((slot) => slot.id), [
+    "class-one",
+  ]);
+});
+
+test("cancelling and undoing a class retain its plan assignment", () => {
+  const original = {
+    id: "class-one",
+    date: "2026-10-22",
+    time: "09:00",
+    status: "READY",
+    planId: "plan-one",
+  };
+  const cancelled = setScheduleStatus([original], original.id, "CANCELLED");
+  assert.equal(cancelled[0].status, "CANCELLED");
+  assert.equal(cancelled[0].planId, "plan-one");
+  assert.deepEqual(upsertScheduleSlot(cancelled, original), [original]);
 });
 
 test("overlap checks include classes that cross midnight", () => {
@@ -205,6 +357,106 @@ test("calendar exports keep the class time and a 45-minute duration", () => {
   assert.match(ics, /SUMMARY:Blush Bodies Beginner Class/);
   assert.match(ics, /DTEND:/);
   assert.match(googleCalendarUrl(scheduledClass), /calendar\.google\.com/);
+});
+
+test("countdown cues play once at three, two and one seconds when enabled", () => {
+  assert.equal(countdownCueSecond(4, null, true), null);
+  assert.equal(countdownCueSecond(3, null, true), 3);
+  assert.equal(countdownCueSecond(3, 3, true), null);
+  assert.equal(countdownCueSecond(2, 3, true), 2);
+  assert.equal(countdownCueSecond(1, 2, true), 1);
+  assert.equal(countdownCueSecond(0, 1, true), null);
+  assert.equal(countdownCueSecond(3, null, false), null);
+});
+
+test("interrupted teaching resumes at the elapsed movement position", () => {
+  const movements = [{ duration: 75 }, { duration: 75 }, { duration: 75 }];
+  const savedAt = 1_000_000;
+  assert.deepEqual(recoverTeachingPosition({
+    movementIndex: 0, remainingSeconds: 20, held: false, savedAt,
+  }, movements, savedAt + 35_000), {
+    movementIndex: 1,
+    remainingSeconds: 60,
+  });
+  assert.deepEqual(recoverTeachingPosition({
+    movementIndex: 1, remainingSeconds: 42, held: true, savedAt,
+  }, movements, savedAt + 120_000), {
+    movementIndex: 1,
+    remainingSeconds: 42,
+  });
+});
+
+test("damaged teaching checkpoints are rejected before opening the class", () => {
+  const valid = {
+    plan: {
+      id: "plan-one",
+      brief: { program: "Beginner" },
+      movements: [{ id: "move-one", title: "Move one", duration: 75 }],
+    },
+    startedAt: 1,
+    savedAt: 1,
+    movementIndex: 0,
+    remainingSeconds: 75,
+    held: false,
+  };
+  assert.equal(isRecoverableTeachingSession(valid), true);
+  assert.equal(isRecoverableTeachingSession({ ...valid, remainingSeconds: -1 }), false);
+  assert.equal(isRecoverableTeachingSession({ ...valid, remainingSeconds: 76 }), false);
+  assert.equal(isRecoverableTeachingSession({ ...valid, movementIndex: 1 }), false);
+  assert.equal(isRecoverableTeachingSession({ ...valid, plan: { ...valid.plan, movements: [] } }), false);
+  assert.equal(isRecoverableTeachingSession({ ...valid, savedAt: "yesterday" }), false);
+});
+
+test("a failed workspace save does not block the next save", async () => {
+  const statuses = [];
+  const writes = [];
+  let latestGeneration = 1;
+  const failed = enqueueWorkspaceSave({
+    previous: Promise.resolve(),
+    write: async () => { throw new Error("storage full"); },
+    key: "workspace",
+    value: "first",
+    generation: 1,
+    latestGeneration: () => latestGeneration,
+    updateStatus: (status) => statuses.push(status),
+  });
+  await assert.rejects(failed.task);
+  await failed.chain;
+
+  latestGeneration = 2;
+  const recovered = enqueueWorkspaceSave({
+    previous: failed.chain,
+    write: async (key, value) => { writes.push([key, value]); },
+    key: "workspace",
+    value: "second",
+    generation: 2,
+    latestGeneration: () => latestGeneration,
+    updateStatus: (status) => statuses.push(status),
+  });
+  await recovered.task;
+  assert.deepEqual(writes, [["workspace", "second"]]);
+  assert.deepEqual(statuses, ["saving", "error", "saving", "saved"]);
+});
+
+test("an older failed save cannot replace the status of a newer request", async () => {
+  let rejectFirst;
+  const pendingWrite = new Promise((resolve, reject) => { rejectFirst = reject; });
+  const statuses = [];
+  let latestGeneration = 1;
+  const first = enqueueWorkspaceSave({
+    previous: Promise.resolve(),
+    write: () => pendingWrite,
+    key: "workspace",
+    value: "first",
+    generation: 1,
+    latestGeneration: () => latestGeneration,
+    updateStatus: (status) => statuses.push(status),
+  });
+  latestGeneration = 2;
+  rejectFirst(new Error("late failure"));
+  await assert.rejects(first.task);
+  await first.chain;
+  assert.deepEqual(statuses, ["saving"]);
 });
 
 test("auto order groups positions and phases without mutating the input", () => {
@@ -579,6 +831,31 @@ test("manual catalogue covers detailed and reference entries without inventing m
   assert(additionalMovements.some((item) => item.phases.includes("Warm-up")));
   assert(additionalMovements.some((item) => item.phases.includes("Main")));
   assert(additionalMovements.some((item) => item.phases.includes("Cool-down")));
+});
+
+test("reviewed manual movements have matching catalogue artwork", () => {
+  const artworkSource = readFileSync(
+    new URL("../src/manualArtwork.ts", import.meta.url),
+    "utf8",
+  );
+  const artworkIds = new Set(
+    [...artworkSource.matchAll(/"(manual-[^"]+)"\s*:/g)].map(
+      (match) => match[1],
+    ),
+  );
+  const catalogueIds = new Set(additionalMovements.map((movement) => movement.id));
+  const reviewedIds = additionalMovements
+    .filter((movement) => movement.reviewStatus === "reviewed")
+    .map((movement) => movement.id);
+
+  assert.deepEqual(
+    reviewedIds.filter((id) => !artworkIds.has(id)),
+    [],
+  );
+  assert.deepEqual(
+    [...artworkIds].filter((id) => !catalogueIds.has(id)),
+    [],
+  );
 });
 
 test("catalogue review and cues migrate into previously stored samples", () => {

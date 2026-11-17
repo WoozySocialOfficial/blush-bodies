@@ -4,6 +4,7 @@
     "slug": "blush-bodies-planner-app",
     "owner": "bohlale.shasha",
     "version": "1.0.0",
+    "description": "Plan, schedule and teach polished Pilates classes from one instructor workspace.",
     "platforms": [
       "ios",
       "android",
@@ -13,7 +14,7 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": false,
+      "supportsTablet": true,
       "bundleIdentifier": "com.blushbodies.planner",
       "buildNumber": "1",
       "config": {
