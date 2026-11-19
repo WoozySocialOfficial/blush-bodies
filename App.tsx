@@ -1,6 +1,7 @@
 import { StatusBar } from "expo-status-bar";
 import { additionalMovements, retiredMovementIds } from "./src/catalogue";
 import { manualArtwork } from "./src/manualArtwork";
+import { manualMovementArtwork } from "./src/manualMovementArtwork";
 import { createCataloguePlan, replaceCatalogueMovement } from "./src/cataloguePlanning";
 import {
   countdownCueSecond,
@@ -516,39 +517,40 @@ const movementLabel = (movement: PlanMovement) =>
 const movementArtworkSource = (
   movement: Pick<PlanMovement, "id" | "position" | "sourceMovementId">,
 ) => {
-  const photo = manualArtwork[movementSourceId(movement)];
+  const sourceId = movementSourceId(movement);
+  const photo = manualMovementArtwork[sourceId] ?? manualArtwork[sourceId];
   if (photo) return photo;
   switch (movementSourceId(movement)) {
     case "breath-centre":
     case "closing-breath":
-      return require("./assets/movement-breath-centre.jpg");
+      return require("./assets/movement-breath-centre.png");
     case "shoulder-rolls":
-      return require("./assets/movement-shoulder-rolls.jpg");
+      return require("./assets/movement-shoulder-rolls.png");
     case "cat-cow":
-      return require("./assets/movement-cat-cow.jpg");
+      return require("./assets/movement-cat-cow.png");
     case "roll-down":
-      return require("./assets/movement-roll-down.jpg");
+      return require("./assets/movement-roll-down.png");
     case "side-leg-lift":
     case "side-leg-right":
     case "side-leg-left":
-      return require("./assets/movement-side-leg-lift.jpg");
+      return require("./assets/movement-side-leg-lift.png");
     case "clamshell":
     case "clamshell-right":
     case "clamshell-left":
-      return require("./assets/movement-clamshell.jpg");
+      return require("./assets/movement-clamshell.png");
     case "hundred":
-      return require("./assets/movement-hundred.jpg");
+      return require("./assets/movement-hundred.png");
     case "single-leg":
     case "single-leg-stretch":
-      return require("./assets/movement-single-leg-stretch.jpg");
+      return require("./assets/movement-single-leg-stretch.png");
     case "donkey-kick":
-      return require("./assets/movement-donkey-kick.jpg");
+      return require("./assets/movement-donkey-kick.png");
     case "spine-twist":
-      return require("./assets/movement-spine-twist.jpg");
+      return require("./assets/movement-spine-twist.png");
     case "figure-four":
-      return require("./assets/movement-figure-four.jpg");
+      return require("./assets/movement-figure-four.png");
     case "supine-twist":
-      return require("./assets/movement-supine-twist.jpg");
+      return require("./assets/movement-supine-twist.png");
     case "standing-reach":
       return require("./assets/movement-standing-reach.jpg");
     case "hip-circles":
@@ -613,7 +615,7 @@ const movementArtworkSource = (
 const movementArtworkMode = (
   movement: Pick<PlanMovement, "id" | "position" | "sourceMovementId">,
 ) =>
-  movementSourceId(movement).startsWith("manual-") ? "contain" : [
+  movementSourceId(movement).startsWith("manual-") ? "cover" : [
     "breath-centre",
     "closing-breath",
     "shoulder-rolls",
@@ -645,13 +647,15 @@ function MovementVisual({ movement, style, label, resizeMode }: {
   label: string;
   resizeMode?: "cover" | "contain";
 }) {
+  const sourceId = movementSourceId(movement);
+  const usesManualArtwork = !movement.imageUri && sourceId.startsWith("manual-");
   const source = movement.imageUri ? { uri: movement.imageUri } : movementArtworkSource(movement);
   return source ? (
-    <Image source={source} style={style}
+    <Image source={source} style={[style, usesManualArtwork && s.manualMovementVisual]}
       resizeMode={resizeMode ?? (movement.imageUri ? "cover" : movementArtworkMode(movement))}
       accessibilityLabel={label} />
   ) : (
-    <View style={[style as StyleProp<ViewStyle>, s.pendingVisual]} accessibilityLabel={movementSourceId(movement).startsWith("manual-") ? "No photo supplied in the manual" : "Movement visual pending"}>
+    <View style={[style as StyleProp<ViewStyle>, s.pendingVisual]} accessibilityLabel={sourceId.startsWith("manual-") ? "No photo supplied in the manual" : "Movement visual pending"}>
       <UserRound size={24} color={C.rose} />
     </View>
   );
@@ -1514,15 +1518,10 @@ function InstructorHome({
                   {completed ? (
                     <>
                       <Pill label="COMPLETED" active green />
-                      <Pressable
-                        onPress={() => review(slot)}
-                        style={s.reviewCompact}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Review ${slot.level} class`}
-                      >
+                      <View style={s.reviewCompact}>
                         <BarChart3 size={13} color={C.rose} />
                         <Text style={s.reviewCompactText}>Review</Text>
-                      </Pressable>
+                      </View>
                     </>
                   ) : ready || inProgress ? (
                     <>
@@ -1531,19 +1530,12 @@ function InstructorHome({
                         active
                         green
                       />
-                      <Pressable
-                        onPress={() => {
-                          if (!swipeIsBlocked(slot.id)) start(slot);
-                        }}
-                        style={s.start}
-                        accessibilityRole="button"
-                        accessibilityLabel={`${inProgress ? "Resume" : "Start"} ${slot.level} class`}
-                      >
+                      <View style={s.start}>
                         <Play size={14} color={C.white} fill={C.white} />
                         <Text style={s.startText}>
                           {inProgress ? "Resume" : "Start"}
                         </Text>
-                      </Pressable>
+                      </View>
                     </>
                   ) : (
                     <View style={s.planNeededAction}>
@@ -3395,9 +3387,19 @@ function Details({
         <Header
           title="Movement Details"
           back={back}
-          right={
+        />
+        <View style={s.detailCard}>
+          <View style={s.detailCardAccent} />
+          <View style={s.detailCardTop}>
+            <View>
+              <Text style={s.detailCardEyebrow}>MOVEMENT CARD</Text>
+              <Text style={s.detailCardStatus}>
+                {movement.reviewStatus === "needs-review" ? "Review pending" : "Instructor reviewed"}
+              </Text>
+            </View>
             <Pressable
               onPress={toggle}
+              style={s.detailFavourite}
               hitSlop={12}
               accessibilityRole="button"
               accessibilityLabel={favourite ? `Remove ${movement.name} from favourites` : `Add ${movement.name} to favourites`}
@@ -3409,37 +3411,60 @@ function Details({
                 fill={favourite ? C.rose : "transparent"}
               />
             </Pressable>
-          }
-        />
-        <View style={s.detailArtwork}>
-          <MovementVisual
-            movement={movement}
-            style={s.detailArtworkImage}
-            label={`${movement.name} movement demonstration`}
-          />
-          <Text style={s.detailArtworkPosition}>{movement.position}</Text>
+          </View>
+          <View style={s.detailArtwork}>
+            <MovementVisual
+              movement={movement}
+              style={s.detailArtworkImage}
+              label={`${movement.name} movement demonstration`}
+              resizeMode="contain"
+            />
+            <Text style={s.detailArtworkPosition}>{movement.position}</Text>
+            <View style={s.detailArtworkStep}>
+              <Text style={s.detailArtworkStepText}>DEMONSTRATION</Text>
+            </View>
+          </View>
+          <View style={s.detailCardBody}>
+            <Text style={s.movementTitle}>{movement.name}</Text>
+            <View style={s.options}>
+              <Pill label={movement.level} active />
+              <Pill label={movement.equipment} />
+              <Pill label={movement.position} />
+            </View>
+            <View style={s.detailFactRow}>
+              <View style={s.detailFactIcon}>
+                <Clock3 size={17} color={C.rose} />
+              </View>
+              <View style={s.flex}>
+                <Text style={s.detailFactLabel}>PLANNED TIME</Text>
+                <Text style={s.detailTime}>
+                  {fmt(movement.duration)} {movement.sideMode === "paired" ? "per side" : "per movement"}
+                </Text>
+              </View>
+            </View>
+            <View style={s.primaryCueCard}>
+              <Text style={s.primaryCueLabel}>PRIMARY TEACHING CUE</Text>
+              <Text style={movement.cues[0] ? s.primaryCueText : s.primaryCuePending}>
+                {movement.cues[0] ?? "Add a clear teaching cue during instructor review."}
+              </Text>
+            </View>
+          </View>
         </View>
-        <Text style={s.movementTitle}>{movement.name}</Text>
-        <View style={s.options}>
-          <Pill label={movement.level} active />
-          <Pill label={movement.equipment} />
-          <Pill label={movement.position} />
-        </View>
-        <View style={s.row}>
-          <Clock3 size={19} color={C.rose} />
-          <Text style={s.detailTime}>{fmt(movement.duration)} {movement.sideMode === "paired" ? "per side" : "planned"}</Text>
-        </View>
-        <Text style={s.group}>TEACHING CUES</Text>
         {movement.reviewStatus === "needs-review" ? <Text style={s.planningWarning}>Instructor review required</Text> : null}
         {movement.reviewedBy ? <Text style={s.sequenceNotice}>Reviewed by {movement.reviewedBy}</Text> : null}
-        {movement.cues.map((cue, index) => (
-          <View key={`${movement.id}-${index}`} style={s.cue}>
-            <View style={s.cueNum}>
-              <Text style={s.cueNumText}>{index + 1}</Text>
-            </View>
-            <Text style={s.cueText}>{cue}</Text>
-          </View>
-        ))}
+        {movement.cues.length > 1 ? (
+          <>
+            <Text style={s.group}>MORE TEACHING CUES</Text>
+            {movement.cues.slice(1).map((cue, index) => (
+              <View key={`${movement.id}-${index + 1}`} style={s.cue}>
+                <View style={s.cueNum}>
+                  <Text style={s.cueNumText}>{index + 2}</Text>
+                </View>
+                <Text style={s.cueText}>{cue}</Text>
+              </View>
+            ))}
+          </>
+        ) : null}
         {movement.manual ? <ManualReference movement={movement} /> : null}
         {planning && movement.sideMode === "paired" ? (
           <>
@@ -3702,37 +3727,39 @@ const LibraryMovementRow = memo(function LibraryMovementRow({
   toggle: (id: string) => void;
 }) {
   return (
-    <Pressable
-      onPress={() => open(movement)}
-      style={s.libraryRow}
-      accessibilityRole="button"
-      accessibilityLabel={`${movement.name}, ${movement.level}, ${movement.position}`}
-    >
-      <View style={s.thumb}>
-        <MovementVisual
-          movement={movement}
-          style={s.thumbImage}
-          label={`${movement.name} movement preview`}
-        />
-      </View>
-      <View style={s.flex}>
-        <Text style={s.moveTitle}>{movement.name}</Text>
-        {movement.reviewStatus === "needs-review" ? (
-          <Text style={s.reviewBadge}>NEEDS REVIEW</Text>
-        ) : null}
-        <Text style={s.libraryPhase}>
-          {(movement.phases ?? ["Main"]).join(" / ")}
-        </Text>
-        <Text style={s.sub}>
-          {movement.level} / {movement.position} / {movement.equipment}
-        </Text>
-      </View>
-      <View style={s.libraryDuration}>
-        <Text style={s.duration}>{fmt(movement.duration)}</Text>
-        {movement.sideMode === "paired" ? (
-          <Text style={s.suggestionReason}>/ side</Text>
-        ) : null}
-      </View>
+    <View style={s.libraryRow}>
+      <Pressable
+        onPress={() => open(movement)}
+        style={s.libraryRowMain}
+        accessibilityRole="button"
+        accessibilityLabel={`${movement.name}, ${movement.level}, ${movement.position}`}
+      >
+        <View style={s.thumb}>
+          <MovementVisual
+            movement={movement}
+            style={s.thumbImage}
+            label={`${movement.name} movement preview`}
+          />
+        </View>
+        <View style={s.flex}>
+          <Text style={s.moveTitle}>{movement.name}</Text>
+          {movement.reviewStatus === "needs-review" ? (
+            <Text style={s.reviewBadge}>NEEDS REVIEW</Text>
+          ) : null}
+          <Text style={s.libraryPhase}>
+            {(movement.phases ?? ["Main"]).join(" / ")}
+          </Text>
+          <Text style={s.sub}>
+            {movement.level} / {movement.position} / {movement.equipment}
+          </Text>
+        </View>
+        <View style={s.libraryDuration}>
+          <Text style={s.duration}>{fmt(movement.duration)}</Text>
+          {movement.sideMode === "paired" ? (
+            <Text style={s.suggestionReason}>/ side</Text>
+          ) : null}
+        </View>
+      </Pressable>
       <Pressable
         onPress={() => toggle(movement.id)}
         hitSlop={10}
@@ -3746,7 +3773,7 @@ const LibraryMovementRow = memo(function LibraryMovementRow({
           fill={favourite ? C.rose : "transparent"}
         />
       </Pressable>
-    </Pressable>
+    </View>
   );
 });
 function Library({
@@ -4967,7 +4994,7 @@ function TeachingSession({
 }) {
   const { height: viewportHeight, width: viewportWidth } = useWindowDimensions();
   const safeArea = useSafeAreaInsets();
-  const compactTeachingView = viewportHeight < 760 || viewportWidth < 380;
+  const compactTeachingView = viewportHeight < 820 || viewportWidth < 380;
   const plan = session.plan;
   const movements = useMemo(
     () => sequenceForTeaching(plan),
@@ -5174,6 +5201,11 @@ function TeachingSession({
   };
   const upcoming = movements[index + 1];
   const classLevel = planLevel(plan);
+  const currentUsesManualArtwork =
+    !current.imageUri && movementSourceId(current).startsWith("manual-");
+  const upcomingUsesManualArtwork = upcoming
+    ? !upcoming.imageUri && movementSourceId(upcoming).startsWith("manual-")
+    : false;
   return (
     <View style={[s.teach, { paddingTop: safeArea.top }]}>
       <StatusBar style="dark" />
@@ -5235,11 +5267,18 @@ function TeachingSession({
             ]}
           />
         </View>
-        <View style={s.movementArtwork}>
+        <View
+          style={[
+            s.movementArtwork,
+            currentUsesManualArtwork && s.movementArtworkManual,
+            currentUsesManualArtwork && compactTeachingView && s.movementArtworkManualCompact,
+          ]}
+        >
           <MovementVisual
             movement={current}
             style={s.movementArtworkImage}
             label={`Demonstration image for ${current.title}`}
+            resizeMode="contain"
           />
         </View>
         {preferences.teachingMode === "Guided" ? (
@@ -5315,11 +5354,18 @@ function TeachingSession({
           ) : null}
         </View>
         {upcoming ? (
-          <View style={[s.upNextVisual, compactTeachingView && s.upNextVisualCompact]}>
+          <View
+            style={[
+              s.upNextVisual,
+              compactTeachingView && s.upNextVisualCompact,
+              upcomingUsesManualArtwork && s.upNextVisualManual,
+            ]}
+          >
             <MovementVisual
               movement={upcoming}
               style={s.upNextVisualImage}
               label={`Preview image for ${upcoming.title}`}
+              resizeMode={upcomingUsesManualArtwork ? "cover" : "contain"}
             />
             <View style={s.upNextArrow}>
               <ChevronRight size={16} color={C.ink} />
@@ -7293,6 +7339,7 @@ const s = StyleSheet.create({
   readinessHeading: { flexDirection: "row", alignItems: "center", gap: 10 },
   readinessError: { color: C.rose, fontSize: 13, lineHeight: 20 },
   pendingVisual: { alignItems: "center", justifyContent: "center", backgroundColor: C.pale },
+  manualMovementVisual: { backgroundColor: C.white },
   reviewBadge: { color: C.gold, fontSize: 10, fontWeight: "800", marginVertical: 3 },
   libraryPhase: { color: C.rose, fontSize: 10, fontWeight: "800", marginTop: 2 },
   libraryDuration: { alignItems: "flex-end", minWidth: 42 },
@@ -8140,14 +8187,54 @@ const s = StyleSheet.create({
   fixedDurationValue: { color: C.ink, fontSize: 15, fontWeight: "900" },
   fixedDurationNote: { color: C.muted, fontSize: 9, marginTop: 2 },
   cueInput: { minHeight: 92, paddingTop: 14 },
+  detailCard: {
+    width: "100%",
+    alignSelf: "center",
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: "#E4CDD1",
+    backgroundColor: C.card,
+    overflow: "hidden",
+    shadowColor: "#6F4652",
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.1,
+    shadowRadius: 18,
+    elevation: 3,
+  },
+  detailCardAccent: { height: 7, backgroundColor: C.rose },
+  detailCardTop: {
+    minHeight: 58,
+    paddingHorizontal: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  detailCardEyebrow: {
+    color: C.rose,
+    fontSize: 9,
+    fontWeight: "900",
+    letterSpacing: 0.8,
+  },
+  detailCardStatus: { color: C.muted, fontSize: 10, marginTop: 3 },
+  detailFavourite: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: "#FAEEEE",
+    alignItems: "center",
+    justifyContent: "center",
+  },
   detailArtwork: {
     width: "100%",
     aspectRatio: 1.6,
-    borderRadius: 18,
     backgroundColor: "#F4E3E3",
     overflow: "hidden",
   },
-  detailArtworkImage: { width: "100%", height: "100%" },
+  detailArtworkImage: {
+    width: "100%",
+    height: "100%",
+    backgroundColor: "#F4E3E3",
+  },
   detailArtworkPosition: {
     position: "absolute",
     left: 12,
@@ -8160,8 +8247,67 @@ const s = StyleSheet.create({
     paddingHorizontal: 9,
     paddingVertical: 5,
   },
+  detailArtworkStep: {
+    position: "absolute",
+    right: 12,
+    top: 12,
+    borderRadius: 10,
+    backgroundColor: "rgba(78,63,68,0.82)",
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+  },
+  detailArtworkStepText: {
+    color: C.white,
+    fontSize: 8,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+  },
+  detailCardBody: { padding: 16, gap: 13 },
   movementTitle: { color: C.ink, fontSize: 28, fontWeight: "800" },
   detailTime: { color: C.ink, fontSize: 14, fontWeight: "800" },
+  detailFactRow: {
+    minHeight: 54,
+    borderRadius: 13,
+    backgroundColor: "#F8F2F0",
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  detailFactIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: C.card,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  detailFactLabel: {
+    color: C.muted,
+    fontSize: 8,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+    marginBottom: 2,
+  },
+  primaryCueCard: {
+    minHeight: 86,
+    borderRadius: 14,
+    borderLeftWidth: 3,
+    borderLeftColor: C.rose,
+    backgroundColor: "#FBF1F1",
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    justifyContent: "center",
+  },
+  primaryCueLabel: {
+    color: C.rose,
+    fontSize: 9,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+    marginBottom: 7,
+  },
+  primaryCueText: { color: C.ink, fontSize: 15, lineHeight: 21, fontWeight: "700" },
+  primaryCuePending: { color: C.gold, fontSize: 13, lineHeight: 19, fontWeight: "700" },
   cue: { flexDirection: "row", alignItems: "center", gap: 12, minHeight: 34 },
   cueNum: {
     width: 25,
@@ -8279,11 +8425,17 @@ const s = StyleSheet.create({
     flex: 1,
     minHeight: 0,
     borderRadius: 13,
-    backgroundColor: "#F4E3E3",
+    backgroundColor: C.white,
     marginTop: 14,
     overflow: "hidden",
   },
-  movementArtworkImage: { width: "100%", height: "100%" },
+  movementArtworkManual: { minHeight: 270 },
+  movementArtworkManualCompact: { minHeight: 190 },
+  movementArtworkImage: {
+    width: "100%",
+    height: "100%",
+    backgroundColor: C.white,
+  },
   movementCardTitle: { marginTop: 12 },
   movementCardTitleCompact: { fontSize: 20, marginTop: 6 },
   movementWorkingSide: { marginTop: 4 },
@@ -8355,11 +8507,19 @@ const s = StyleSheet.create({
     width: 128,
     height: 76,
     marginVertical: -6,
-    backgroundColor: "#F4E3E3",
+    backgroundColor: C.white,
     overflow: "hidden",
   },
   upNextVisualCompact: { width: 108 },
-  upNextVisualImage: { width: "100%", height: "100%" },
+  upNextVisualManual: {
+    borderLeftWidth: 1,
+    borderLeftColor: C.line,
+  },
+  upNextVisualImage: {
+    width: "100%",
+    height: "100%",
+    backgroundColor: C.white,
+  },
   upNextArrow: {
     position: "absolute",
     right: 8,
@@ -8457,6 +8617,14 @@ const s = StyleSheet.create({
     borderRadius: 15,
     backgroundColor: C.card,
     paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 11,
+  },
+  libraryRowMain: {
+    flex: 1,
+    minWidth: 0,
+    alignSelf: "stretch",
     flexDirection: "row",
     alignItems: "center",
     gap: 11,
