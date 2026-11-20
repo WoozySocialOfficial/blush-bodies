@@ -14,7 +14,11 @@ import {
   saveRemoteWorkspaceState,
 } from "./src/remoteWorkspace";
 import { requireSupabase, supabase, supabaseConfigured } from "./src/supabase";
-import { authRedirectUrl, authTokensFromUrl } from "./src/authLinks";
+import {
+  authRedirectUrl,
+  authTokensFromUrl,
+  passwordResetErrorMessage,
+} from "./src/authLinks";
 import {
   isOwnedMovementImageUri,
   referencedMovementImageUris,
@@ -6858,8 +6862,8 @@ function BlushBodiesApp() {
       );
       if (error) throw error;
       return null;
-    } catch {
-      return "The recovery email could not be sent. Check your connection and try again.";
+    } catch (error) {
+      return passwordResetErrorMessage(error);
     }
   };
   const updateRecoveredPassword = async (

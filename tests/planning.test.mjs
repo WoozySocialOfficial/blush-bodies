@@ -33,7 +33,11 @@ import {
 import {
   isOwnedMovementImageUri, referencedMovementImageUris,
 } from "../src/movementImages.ts";
-import { authRedirectUrl, authTokensFromUrl } from "../src/authLinks.ts";
+import {
+  authRedirectUrl,
+  authTokensFromUrl,
+  passwordResetErrorMessage,
+} from "../src/authLinks.ts";
 
 const movement = (id, position = "Standing", phase = "Main", duration = MOVEMENT_DURATION_SECONDS) => ({
   id, title: id, position, phase, duration, cue: "Test cue",
@@ -81,6 +85,23 @@ test("auth links use stable platform redirects and recover Supabase tokens", () 
     { accessToken: "access", refreshToken: "refresh", type: "recovery" },
   );
   assert.equal(authTokensFromUrl("blushbodies://auth?type=signup"), null);
+});
+
+test("password recovery errors give users an actionable message", () => {
+  assert.match(
+    passwordResetErrorMessage({
+      code: "over_email_send_rate_limit",
+      status: 429,
+    }),
+    /wait a few minutes/i,
+  );
+  assert.match(
+    passwordResetErrorMessage({
+      message: "Error sending recovery email",
+      status: 500,
+    }),
+    /temporarily unavailable/i,
+  );
 });
 
 test("workspace backups round-trip only for the signed-in account", () => {
