@@ -33,6 +33,7 @@ import {
 import {
   isOwnedMovementImageUri, referencedMovementImageUris,
 } from "../src/movementImages.ts";
+import { authRedirectUrl, authTokensFromUrl } from "../src/authLinks.ts";
 
 const movement = (id, position = "Standing", phase = "Main", duration = MOVEMENT_DURATION_SECONDS) => ({
   id, title: id, position, phase, duration, cue: "Test cue",
@@ -65,6 +66,21 @@ const backupWorkspace = (overrides = {}) => ({
     countdownSound: false, completionSound: true,
   },
   ...overrides,
+});
+
+test("auth links use stable platform redirects and recover Supabase tokens", () => {
+  assert.equal(authRedirectUrl("native"), "blushbodies://auth");
+  assert.equal(
+    authRedirectUrl("web", "https://example.com/"),
+    "https://example.com/",
+  );
+  assert.deepEqual(
+    authTokensFromUrl(
+      "blushbodies://auth#access_token=access&refresh_token=refresh&type=recovery",
+    ),
+    { accessToken: "access", refreshToken: "refresh", type: "recovery" },
+  );
+  assert.equal(authTokensFromUrl("blushbodies://auth?type=signup"), null);
 });
 
 test("workspace backups round-trip only for the signed-in account", () => {

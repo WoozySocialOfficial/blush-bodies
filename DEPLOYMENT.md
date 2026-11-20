@@ -27,7 +27,10 @@ upgrading.
 1. Push this project to a GitHub repository.
 2. In Railway, create a project and choose **Deploy from GitHub repo**.
 3. Select this repository. Railway reads `railway.json` automatically.
-4. After the first deployment succeeds, open **Settings > Networking** and
+4. Add the two variables from `.env.example` using the official Supabase
+   project's URL and publishable key. Never add a database password or a
+   service-role key to the app or Railway.
+5. After the first deployment succeeds, open **Settings > Networking** and
    generate a public domain.
 
 Railway runs:
@@ -37,7 +40,24 @@ npm run build:web
 npm run start:web
 ```
 
-No environment variables are required for the current local prototype.
+Required Railway variables:
+
+```text
+EXPO_PUBLIC_SUPABASE_URL=https://your-project-ref.supabase.co
+EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=your-publishable-key
+```
+
+## Supabase authentication redirects
+
+In **Supabase > Authentication > URL Configuration**:
+
+1. Set the Site URL to the stable Railway HTTPS domain.
+2. Add the Railway domain with `/**` to the redirect allow list.
+3. Add `blushbodies://auth` for confirmation and password-reset links opened
+   from the installed mobile app.
+
+Do not use `localhost` as the production Site URL. Localhost is only suitable
+for browser testing on the same computer.
 
 ## Local Production Check
 
@@ -48,8 +68,10 @@ npx serve -s dist -l 4173
 
 Open `http://localhost:4173`.
 
-## Prototype Data
+## Shared Data
 
-Mobile credentials use Expo SecureStore. The browser demonstration stores only
-salted password hashes and app data in that browser's local storage. Data is not
-shared between devices because no production backend is connected yet.
+Accounts and shared workspace state use Supabase when the two public variables
+are configured. Mobile credentials are persisted with Expo SecureStore. Run the
+database migration in `supabase/migrations` before testing a new Supabase
+project, then confirm that two separate accounts in the same workspace can see
+the same schedule and plans.

@@ -3,6 +3,7 @@
     "name": "Blush Bodies Planner",
     "slug": "blush-bodies-planner-app",
     "owner": "bohlale.shasha",
+    "scheme": "blushbodies",
     "version": "1.0.0",
     "description": "Plan, schedule and teach polished Pilates classes from one instructor workspace.",
     "platforms": [

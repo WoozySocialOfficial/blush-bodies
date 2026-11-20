@@ -1,6 +1,5 @@
 import { StatusBar } from "expo-status-bar";
 import { additionalMovements, retiredMovementIds } from "./src/catalogue";
-import { manualArtwork } from "./src/manualArtwork";
 import { manualMovementArtwork } from "./src/manualMovementArtwork";
 import { createCataloguePlan, replaceCatalogueMovement } from "./src/cataloguePlanning";
 import {
@@ -15,6 +14,7 @@ import {
   saveRemoteWorkspaceState,
 } from "./src/remoteWorkspace";
 import { requireSupabase, supabase, supabaseConfigured } from "./src/supabase";
+import { authRedirectUrl, authTokensFromUrl } from "./src/authLinks";
 import {
   isOwnedMovementImageUri,
   referencedMovementImageUris,
@@ -140,7 +140,9 @@ type Screen =
   | "welcome"
   | "signin"
   | "signup"
+  | "forgotPassword"
   | "resetPassword"
+  | "recoverPassword"
   | "create"
   | "generated"
   | "editor"
@@ -252,6 +254,13 @@ const CREDENTIALS_KEY = "blush-bodies-local-credentials-v1";
 const PASSWORD_MIN_LENGTH = 12;
 const PASSWORD_MAX_LENGTH = 128;
 const ALLOW_SANDBOX_PASSWORD_RESET = __DEV__;
+const currentAuthRedirectUrl = () => {
+  const location = (globalThis as { location?: { origin?: string } }).location;
+  return authRedirectUrl(
+    Platform.OS === "web" ? "web" : "native",
+    location?.origin,
+  );
+};
 const DEMO_ACCOUNT: Account = {
   name: "Blush Bodies Instructor",
   email: "demo@blushbodies.com",
@@ -518,7 +527,7 @@ const movementArtworkSource = (
   movement: Pick<PlanMovement, "id" | "position" | "sourceMovementId">,
 ) => {
   const sourceId = movementSourceId(movement);
-  const photo = manualMovementArtwork[sourceId] ?? manualArtwork[sourceId];
+  const photo = manualMovementArtwork[sourceId];
   if (photo) return photo;
   switch (movementSourceId(movement)) {
     case "breath-centre":
@@ -959,6 +968,22 @@ function SignIn({
             placeholderTextColor={C.muted}
             style={s.formInput}
           />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={
+              allowSandboxReset
+                ? "Reset local test password"
+                : "Forgot password"
+            }
+            onPress={() => resetPassword(email.trim().toLowerCase())}
+            style={s.forgotPasswordAction}
+          >
+            <Text style={s.forgotPasswordText}>
+              {allowSandboxReset
+                ? "Reset local test password"
+                : "Forgot password?"}
+            </Text>
+          </Pressable>
           {error ? <Text style={s.formError}>{error}</Text> : null}
           <Main
             label={submitting ? "Checking Account..." : "Sign In"}
@@ -973,14 +998,6 @@ function SignIn({
           <Pressable accessibilityRole="button" onPress={signup}>
             <Text style={s.forgot}>Create a new account</Text>
           </Pressable>
-          {allowSandboxReset ? (
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => resetPassword(email.trim().toLowerCase())}
-            >
-              <Text style={s.forgot}>Reset local test password</Text>
-            </Pressable>
-          ) : null}
         </View>
         <View style={s.demoNote}>
           <Text style={s.whyLabel}>YOUR WORKSPACE</Text>
@@ -1146,6 +1163,221 @@ function SandboxPasswordReset({
     </View>
   );
 }
+
+function PasswordResetRequest({
+  back,
+  initialEmail,
+  send,
+}: {
+  back: () => void;
+  initialEmail?: string;
+  send: (email: string) => Promise<string | null>;
+}) {
+  const [email, setEmail] = useState(initialEmail ?? "");
+  const [error, setError] = useState("");
+  const [sent, setSent] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const submit = async () => {
+    if (submitting) return;
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!/^\S+@\S+\.\S+$/.test(normalizedEmail)) {
+      setError("Enter the email address used for your account.");
+      return;
+    }
+    setSubmitting(true);
+    setError("");
+    try {
+      const message = await send(normalizedEmail);
+      if (message) {
+        setError(message);
+        return;
+      }
+      setSent(true);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  return (
+    <View style={s.flex}>
+      <StatusBar style="dark" />
+      <ScrollView
+        contentContainerStyle={s.signin}
+        keyboardShouldPersistTaps="handled"
+      >
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Go back to sign in"
+          onPress={back}
+        >
+          <ArrowLeft size={22} color={C.muted} />
+        </Pressable>
+        <View style={s.signinBrand}>
+          <Text style={s.brandTitle}>BLUSH BODIES</Text>
+          <Text style={s.brandSub}>SECURE ACCOUNT RECOVERY</Text>
+        </View>
+        <View style={s.signinCopy}>
+          <Text style={s.signinTitle}>
+            {sent ? "Check your email" : "Reset your password"}
+          </Text>
+          <Text style={s.sub}>
+            {sent
+              ? `We sent password recovery instructions to ${email.trim().toLowerCase()}.`
+              : "Enter your account email and we will send you a secure password reset link."}
+          </Text>
+        </View>
+        {sent ? (
+          <View style={s.form}>
+            <View style={s.demoNote}>
+              <Text style={s.whyLabel}>RECOVERY EMAIL SENT</Text>
+              <Text style={s.whyCopy}>
+                Open the latest Blush Bodies email on this device. If it does
+                not arrive, check spam or request another link.
+              </Text>
+            </View>
+            <Main label="Back to Sign In" onPress={back} />
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                setSent(false);
+                setError("");
+              }}
+            >
+              <Text style={s.forgot}>Use a different email</Text>
+            </Pressable>
+          </View>
+        ) : (
+          <View style={s.form}>
+            <Text style={s.label}>ACCOUNT EMAIL</Text>
+            <TextInput
+              accessibilityLabel="Account email"
+              value={email}
+              onChangeText={(value) => {
+                setEmail(value);
+                setError("");
+              }}
+              autoCapitalize="none"
+              autoCorrect={false}
+              autoComplete="email"
+              textContentType="emailAddress"
+              keyboardType="email-address"
+              maxLength={254}
+              placeholder="you@email.com"
+              placeholderTextColor={C.muted}
+              style={s.formInput}
+            />
+            {error ? <Text style={s.formError}>{error}</Text> : null}
+            <Main
+              label={submitting ? "Sending Reset Link..." : "Send Reset Link"}
+              onPress={submit}
+            />
+          </View>
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
+function RecoveryPasswordReset({
+  back,
+  complete,
+}: {
+  back: () => void;
+  complete: (password: string) => Promise<string | null>;
+}) {
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const submit = async () => {
+    if (submitting) return;
+    const passwordError = passwordValidationError(password);
+    if (passwordError) {
+      setError(passwordError);
+      return;
+    }
+    if (password !== confirmation) {
+      setError("The new passwords do not match.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const message = await complete(password);
+      if (message) setError(message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  return (
+    <View style={s.flex}>
+      <StatusBar style="dark" />
+      <ScrollView
+        contentContainerStyle={s.signin}
+        keyboardShouldPersistTaps="handled"
+      >
+        <Pressable accessibilityRole="button" accessibilityLabel="Go back" onPress={back}>
+          <ArrowLeft size={22} color={C.muted} />
+        </Pressable>
+        <View style={s.signinBrand}>
+          <Text style={s.brandTitle}>BLUSH BODIES</Text>
+          <Text style={s.brandSub}>SECURE ACCOUNT RECOVERY</Text>
+        </View>
+        <View style={s.signinCopy}>
+          <Text style={s.signinTitle}>Choose a new password</Text>
+          <Text style={s.sub}>
+            Your recovery link has been verified. Set the password you will use
+            to sign in from now on.
+          </Text>
+        </View>
+        <View style={s.form}>
+          <Text style={s.label}>NEW PASSWORD</Text>
+          <TextInput
+            accessibilityLabel="New password"
+            value={password}
+            onChangeText={(value) => {
+              setPassword(value);
+              setError("");
+            }}
+            secureTextEntry
+            autoCapitalize="none"
+            autoComplete="new-password"
+            textContentType="newPassword"
+            maxLength={PASSWORD_MAX_LENGTH}
+            placeholder="Create a new password"
+            placeholderTextColor={C.muted}
+            style={s.formInput}
+          />
+          <Text style={s.label}>CONFIRM NEW PASSWORD</Text>
+          <TextInput
+            accessibilityLabel="Confirm new password"
+            value={confirmation}
+            onChangeText={(value) => {
+              setConfirmation(value);
+              setError("");
+            }}
+            secureTextEntry
+            autoCapitalize="none"
+            autoComplete="new-password"
+            textContentType="newPassword"
+            maxLength={PASSWORD_MAX_LENGTH}
+            placeholder="Repeat the new password"
+            placeholderTextColor={C.muted}
+            style={s.formInput}
+          />
+          <Text style={s.sub}>
+            At least {PASSWORD_MIN_LENGTH} characters with uppercase, lowercase
+            and a number.
+          </Text>
+          {error ? <Text style={s.formError}>{error}</Text> : null}
+          <Main
+            label={submitting ? "Updating Password..." : "Update Password"}
+            onPress={submit}
+          />
+        </View>
+      </ScrollView>
+    </View>
+  );
+}
+
 function SignUp({
   back,
   complete,
@@ -3323,7 +3555,7 @@ function ManualReference({ movement }: { movement: LibraryMovement }) {
       {manual.coverage === "reference-only" ? (
         <Text style={s.planningWarning}>Reference only: no complete written teaching sequence is supplied.</Text>
       ) : null}
-      {!movement.imageUri && !manualArtwork[movement.id] ? <Text style={s.sub}>No photo supplied in the manual.</Text> : null}
+      {!movement.imageUri && !manualMovementArtwork[movement.id] ? <Text style={s.sub}>No photo supplied in the manual.</Text> : null}
       {manual.notes.map((note, index) => <Text key={index} style={s.sequenceNotice}>{note}</Text>)}
       <Text style={s.sub}>1:15 is the app's planning block, not a duration prescribed by the manual.</Text>
       <Pressable onPress={() => setExpanded(!expanded)} accessibilityRole="button"
@@ -4994,7 +5226,16 @@ function TeachingSession({
 }) {
   const { height: viewportHeight, width: viewportWidth } = useWindowDimensions();
   const safeArea = useSafeAreaInsets();
-  const compactTeachingView = viewportHeight < 820 || viewportWidth < 380;
+  const veryCompactTeachingView = viewportHeight < 700 || viewportWidth < 350;
+  const compactTeachingView = viewportHeight < 820 || viewportWidth < 390;
+  const largeTeachingView = viewportWidth >= 600 && viewportHeight >= 820;
+  const teachingArtworkMinHeight = veryCompactTeachingView
+    ? 112
+    : compactTeachingView
+      ? 152
+      : largeTeachingView
+        ? 270
+        : 210;
   const plan = session.plan;
   const movements = useMemo(
     () => sequenceForTeaching(plan),
@@ -5210,8 +5451,20 @@ function TeachingSession({
     <View style={[s.teach, { paddingTop: safeArea.top }]}>
       <StatusBar style="dark" />
       {Platform.OS !== "web" ? <TeachingKeepAwake /> : null}
-      <View style={[s.teachContent, compactTeachingView && s.teachContentCompact]}>
-      <View style={[s.teachTop, compactTeachingView && s.teachTopCompact]}>
+      <View
+        style={[
+          s.teachContent,
+          compactTeachingView && s.teachContentCompact,
+          veryCompactTeachingView && s.teachContentVeryCompact,
+          largeTeachingView && s.teachContentLarge,
+          { paddingBottom: Math.max(safeArea.bottom, veryCompactTeachingView ? 4 : 8) },
+        ]}
+      >
+      <View style={[
+        s.teachTop,
+        compactTeachingView && s.teachTopCompact,
+        veryCompactTeachingView && s.teachTopVeryCompact,
+      ]}>
         <Pressable
           onPress={pauseAndExit}
           style={[s.avatar, s.teachClose]}
@@ -5229,7 +5482,7 @@ function TeachingSession({
           </Text>
         </View>
       </View>
-      <View style={s.teachStepHeading}>
+      <View style={[s.teachStepHeading, veryCompactTeachingView && s.teachStepHeadingVeryCompact]}>
         <Text style={s.label}>{held ? "CLASS PAUSED" : "CLASS IN PROGRESS"}</Text>
         <Text style={s.teachStepLabel}>
           Step {index + 1} of {movements.length}
@@ -5239,6 +5492,7 @@ function TeachingSession({
         style={[
           s.movementCard,
           compactTeachingView && s.movementCardCompact,
+          veryCompactTeachingView && s.movementCardVeryCompact,
           {
             opacity: cardOpacity,
             transform: [{ translateY: cardOffset }],
@@ -5249,7 +5503,12 @@ function TeachingSession({
           <Pill label={current.phase === "Main" ? "Main sequence" : current.phase} active />
           <Pill label={current.position} active green />
         </View>
-        <Text style={[s.headerTitle, s.movementCardTitle, compactTeachingView && s.movementCardTitleCompact]}>{current.title}</Text>
+        <Text style={[
+          s.headerTitle,
+          s.movementCardTitle,
+          compactTeachingView && s.movementCardTitleCompact,
+          veryCompactTeachingView && s.movementCardTitleVeryCompact,
+        ]}>{current.title}</Text>
         {sideLabel(current) ? <Text style={[s.sub, s.movementWorkingSide]}>Participant · {sideLabel(current)}</Text> : null}
         <View style={s.movementProgressRow}>
           <Text style={s.movementCardCount}>
@@ -5272,6 +5531,8 @@ function TeachingSession({
             s.movementArtwork,
             currentUsesManualArtwork && s.movementArtworkManual,
             currentUsesManualArtwork && compactTeachingView && s.movementArtworkManualCompact,
+            { minHeight: teachingArtworkMinHeight },
+            veryCompactTeachingView && s.movementArtworkVeryCompact,
           ]}
         >
           <MovementVisual
@@ -5282,18 +5543,29 @@ function TeachingSession({
           />
         </View>
         {preferences.teachingMode === "Guided" ? (
-          <View style={s.movementCue}>
+          <View style={[s.movementCue, veryCompactTeachingView && s.movementCueVeryCompact]}>
             <Text style={[s.label, s.movementCueLabel]}>COACHING CUE</Text>
-            <Text style={s.movementCueText}>{current.cue}</Text>
+            <Text style={[s.movementCueText, veryCompactTeachingView && s.movementCueTextVeryCompact]}>
+              {current.cue}
+            </Text>
           </View>
         ) : null}
       </Animated.View>
-      <View style={[s.controls, compactTeachingView && s.controlsCompact]}>
+      <View style={[
+        s.controls,
+        compactTeachingView && s.controlsCompact,
+        veryCompactTeachingView && s.controlsVeryCompact,
+      ]}>
         <View style={s.teachControlGroup}>
           <Pressable
             onPress={() => go(index - 1)}
             disabled={index === 0}
-            style={[s.iconAction, s.navControl, index === 0 && s.disabled]}
+            style={[
+              s.iconAction,
+              s.navControl,
+              veryCompactTeachingView && s.navControlVeryCompact,
+              index === 0 && s.disabled,
+            ]}
             accessibilityRole="button"
             accessibilityLabel="Previous movement"
             accessibilityState={{ disabled: index === 0 }}
@@ -5305,7 +5577,7 @@ function TeachingSession({
         <View style={s.teachControlGroup}>
           <Pressable
             onPress={toggleHold}
-            style={[s.main, s.hold]}
+            style={[s.main, s.hold, veryCompactTeachingView && s.holdVeryCompact]}
             accessibilityRole="button"
             accessibilityLabel={held ? "Resume timer" : "Pause timer"}
           >
@@ -5320,7 +5592,7 @@ function TeachingSession({
         <View style={s.teachControlGroup}>
           <Pressable
             onPress={nextStep}
-            style={[s.iconAction, s.navControl]}
+            style={[s.iconAction, s.navControl, veryCompactTeachingView && s.navControlVeryCompact]}
             accessibilityRole="button"
             accessibilityLabel={upcoming ? "Next movement" : "Finish class"}
           >
@@ -5331,7 +5603,11 @@ function TeachingSession({
       </View>
       <Pressable
         onPress={() => (upcoming ? go(index + 1) : confirmEnd())}
-        style={[s.upNext, !upcoming && s.upNextComplete]}
+        style={[
+          s.upNext,
+          veryCompactTeachingView && s.upNextVeryCompact,
+          !upcoming && s.upNextComplete,
+        ]}
         accessibilityRole="button"
         accessibilityLabel={upcoming ? `Next movement: ${upcoming.title}` : "Finish class and view summary"}
       >
@@ -5358,6 +5634,7 @@ function TeachingSession({
             style={[
               s.upNextVisual,
               compactTeachingView && s.upNextVisualCompact,
+              veryCompactTeachingView && s.upNextVisualVeryCompact,
               upcomingUsesManualArtwork && s.upNextVisualManual,
             ]}
           >
@@ -5375,7 +5652,12 @@ function TeachingSession({
           <ChevronRight size={20} color={C.rose} />
         )}
       </Pressable>
-      <Pressable onPress={confirmEnd} style={s.endClass} accessibilityRole="button" accessibilityLabel="End class">
+      <Pressable
+        onPress={confirmEnd}
+        style={[s.endClass, veryCompactTeachingView && s.endClassVeryCompact]}
+        accessibilityRole="button"
+        accessibilityLabel="End class"
+      >
         <Text style={[s.stepLabel, s.endClassText]}>End Class</Text>
       </Pressable>
       </View>
@@ -6357,6 +6639,10 @@ function BlushBodiesApp() {
         if (active) setAuthReady(true);
       });
     const { data: authListener } = supabase.auth.onAuthStateChange((event) => {
+      if (event === "PASSWORD_RECOVERY") {
+        setScreen("recoverPassword");
+        return;
+      }
       if (event !== "SIGNED_OUT") return;
       remoteWorkspaceId.current = null;
       remoteWorkspaceRevision.current = 0;
@@ -6366,6 +6652,31 @@ function BlushBodiesApp() {
     return () => {
       active = false;
       authListener.subscription.unsubscribe();
+    };
+  }, []);
+  useEffect(() => {
+    const client = supabase;
+    if (!supabaseConfigured || !client || Platform.OS === "web") return;
+    let active = true;
+    const openAuthLink = async (url?: string | null) => {
+      if (!active || !url) return;
+      const tokens = authTokensFromUrl(url);
+      if (!tokens) return;
+      const { error } = await client.auth.setSession({
+        access_token: tokens.accessToken,
+        refresh_token: tokens.refreshToken,
+      });
+      if (error || !active) return;
+      if (tokens.type === "recovery") setScreen("recoverPassword");
+      else setScreen("signin");
+    };
+    void Linking.getInitialURL().then(openAuthLink);
+    const listener = Linking.addEventListener("url", ({ url }) => {
+      void openAuthLink(url);
+    });
+    return () => {
+      active = false;
+      listener.remove();
     };
   }, []);
   const authenticate = async (
@@ -6446,6 +6757,7 @@ function BlushBodiesApp() {
           email: newAccount.email,
           password,
           options: {
+            emailRedirectTo: currentAuthRedirectUrl(),
             data: {
               full_name: newAccount.name,
               workspace_name: "Blush Bodies",
@@ -6530,6 +6842,41 @@ function BlushBodiesApp() {
       return null;
     } catch {
       return "The password could not be updated. Please try again.";
+    }
+  };
+  const requestRemotePasswordReset = async (
+    email: string,
+  ): Promise<string | null> => {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!/^\S+@\S+\.\S+$/.test(normalizedEmail)) {
+      return "Enter the email address used for your account.";
+    }
+    try {
+      const { error } = await requireSupabase().auth.resetPasswordForEmail(
+        normalizedEmail,
+        { redirectTo: currentAuthRedirectUrl() },
+      );
+      if (error) throw error;
+      return null;
+    } catch {
+      return "The recovery email could not be sent. Check your connection and try again.";
+    }
+  };
+  const updateRecoveredPassword = async (
+    password: string,
+  ): Promise<string | null> => {
+    const passwordError = passwordValidationError(password);
+    if (passwordError) return passwordError;
+    try {
+      const client = requireSupabase();
+      const { data, error } = await client.auth.updateUser({ password });
+      if (error || !data.user)
+        return error?.message ?? "The recovered account could not be updated.";
+      await connectRemoteAccount(data.user);
+      Alert.alert("Password updated", "Your account is ready to use.");
+      return null;
+    } catch {
+      return "The recovery link may have expired. Request a new link and try again.";
     }
   };
   const resetSandboxPassword = async (
@@ -6893,11 +7240,23 @@ function BlushBodiesApp() {
         }}
         resetPassword={(email) => {
           setResetEmail(email);
+          if (supabaseConfigured) {
+            setScreen("forgotPassword");
+            return;
+          }
           setScreen("resetPassword");
         }}
         complete={(email, password) =>
           authenticate("instructor", email, password)
         }
+      />
+    );
+  if (screen === "forgotPassword")
+    return (
+      <PasswordResetRequest
+        initialEmail={resetEmail}
+        back={() => setScreen("signin")}
+        send={requestRemotePasswordReset}
       />
     );
   if (screen === "resetPassword")
@@ -6909,6 +7268,16 @@ function BlushBodiesApp() {
         reset={(email, password) =>
           resetSandboxPassword("instructor", email, password)
         }
+      />
+    );
+  if (screen === "recoverPassword")
+    return (
+      <RecoveryPasswordReset
+        back={() => {
+          void requireSupabase().auth.signOut();
+          setScreen("signin");
+        }}
+        complete={updateRecoveredPassword}
       />
     );
   if (screen === "signup")
@@ -7493,6 +7862,17 @@ const s = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
     marginBottom: 4,
+  },
+  forgotPasswordAction: {
+    alignSelf: "flex-end",
+    marginTop: -6,
+    paddingVertical: 6,
+    paddingLeft: 12,
+  },
+  forgotPasswordText: {
+    color: C.rose,
+    fontSize: 13,
+    fontWeight: "800",
   },
   forgot: {
     alignSelf: "center",
@@ -8329,6 +8709,12 @@ const s = StyleSheet.create({
     paddingBottom: Platform.OS === "ios" ? 20 : 8,
   },
   teachContentCompact: { paddingHorizontal: 14, paddingBottom: 8 },
+  teachContentVeryCompact: { paddingHorizontal: 10, paddingBottom: 4 },
+  teachContentLarge: {
+    width: "100%",
+    maxWidth: 620,
+    alignSelf: "center",
+  },
   teachTop: {
     minHeight: 52,
     flexDirection: "row",
@@ -8336,6 +8722,7 @@ const s = StyleSheet.create({
     gap: 12,
   },
   teachTopCompact: { minHeight: 44 },
+  teachTopVeryCompact: { minHeight: 40 },
   teachClose: {
     width: 38,
     height: 38,
@@ -8354,6 +8741,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 2,
     paddingVertical: 8,
   },
+  teachStepHeadingVeryCompact: { paddingVertical: 4 },
   teachStepLabel: { color: C.muted, fontSize: 11, fontWeight: "500" },
   teachTimerRow: {
     flexDirection: "row",
@@ -8390,6 +8778,12 @@ const s = StyleSheet.create({
     overflow: "hidden",
   },
   movementCardCompact: { paddingHorizontal: 12, paddingVertical: 12, marginTop: 5 },
+  movementCardVeryCompact: {
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    marginTop: 3,
+    borderRadius: 15,
+  },
   movementCardHeader: {
     flexDirection: "row",
     alignItems: "center",
@@ -8430,7 +8824,8 @@ const s = StyleSheet.create({
     overflow: "hidden",
   },
   movementArtworkManual: { minHeight: 270 },
-  movementArtworkManualCompact: { minHeight: 190 },
+  movementArtworkManualCompact: { minHeight: 152 },
+  movementArtworkVeryCompact: { marginTop: 7 },
   movementArtworkImage: {
     width: "100%",
     height: "100%",
@@ -8438,6 +8833,7 @@ const s = StyleSheet.create({
   },
   movementCardTitle: { marginTop: 12 },
   movementCardTitleCompact: { fontSize: 20, marginTop: 6 },
+  movementCardTitleVeryCompact: { fontSize: 18, lineHeight: 22, marginTop: 5 },
   movementWorkingSide: { marginTop: 4 },
   movementCue: {
     minHeight: 66,
@@ -8459,6 +8855,13 @@ const s = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
   },
+  movementCueVeryCompact: {
+    minHeight: 50,
+    marginTop: 7,
+    paddingHorizontal: 9,
+    paddingVertical: 7,
+  },
+  movementCueTextVeryCompact: { fontSize: 12, lineHeight: 16 },
   controls: {
     flexDirection: "row",
     alignItems: "center",
@@ -8466,18 +8869,21 @@ const s = StyleSheet.create({
     marginTop: 8,
   },
   controlsCompact: { marginTop: 7 },
+  controlsVeryCompact: { marginTop: 4 },
   teachControlGroup: { width: 76, alignItems: "center", gap: 6 },
   navControl: {
     width: 48,
     height: 48,
     borderRadius: 24,
   },
+  navControlVeryCompact: { width: 42, height: 42, borderRadius: 21 },
   controlLabel: { fontSize: 11 },
   hold: {
     width: 54,
     height: 54,
     borderRadius: 27,
   },
+  holdVeryCompact: { width: 48, height: 48, borderRadius: 24 },
   upNext: {
     height: 76,
     flexShrink: 0,
@@ -8492,6 +8898,7 @@ const s = StyleSheet.create({
     marginTop: 8,
     overflow: "hidden",
   },
+  upNextVeryCompact: { height: 64, marginTop: 5, paddingLeft: 11 },
   upNextComplete: { paddingRight: 14 },
   upText: { fontSize: 13, marginTop: 3 },
   upNextSide: { color: C.muted, fontSize: 10, marginTop: 2 },
@@ -8511,6 +8918,7 @@ const s = StyleSheet.create({
     overflow: "hidden",
   },
   upNextVisualCompact: { width: 108 },
+  upNextVisualVeryCompact: { width: 92, height: 64, marginVertical: -6 },
   upNextVisualManual: {
     borderLeftWidth: 1,
     borderLeftColor: C.line,
@@ -8540,6 +8948,7 @@ const s = StyleSheet.create({
     marginTop: 4,
   },
   endClassText: { fontSize: 11 },
+  endClassVeryCompact: { height: 26, marginTop: 2 },
   summaryHero: {
     minHeight: 170,
     backgroundColor: C.card,
