@@ -12,6 +12,9 @@ const authParameters = (url: string) => {
   return new URLSearchParams(hash || query);
 };
 
+export const isExpiredAuthLink = (url: string) =>
+  authParameters(url).get("error_code") === "otp_expired";
+
 export const authTokensFromUrl = (url: string): AuthLinkTokens | null => {
   try {
     const parameters = authParameters(url);

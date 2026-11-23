@@ -10,6 +10,18 @@ export const supabaseConfigured = Boolean(
   supabaseUrl && supabasePublishableKey,
 );
 
+// Supabase removes the callback fragment as soon as it validates the session.
+let initialWebAuthUrl =
+  supabaseConfigured && Platform.OS === "web" && typeof window !== "undefined"
+    ? window.location.href
+    : undefined;
+
+export const takeInitialWebAuthUrl = () => {
+  const url = initialWebAuthUrl;
+  initialWebAuthUrl = undefined;
+  return url;
+};
+
 export const supabase: SupabaseClient | null = supabaseConfigured
   ? createClient(supabaseUrl!, supabasePublishableKey!, {
       auth: {

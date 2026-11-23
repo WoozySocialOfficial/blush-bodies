@@ -13,10 +13,16 @@ import {
   loadRemoteWorkspaceState,
   saveRemoteWorkspaceState,
 } from "./src/remoteWorkspace";
-import { requireSupabase, supabase, supabaseConfigured } from "./src/supabase";
+import {
+  requireSupabase,
+  supabase,
+  supabaseConfigured,
+  takeInitialWebAuthUrl,
+} from "./src/supabase";
 import {
   authRedirectUrl,
   authTokensFromUrl,
+  isExpiredAuthLink,
   passwordResetErrorMessage,
 } from "./src/authLinks";
 import {
@@ -873,9 +879,12 @@ function Welcome({
     </View>
   );
 }
+type SignInNotice = { title: string; message: string; email?: string };
+
 function SignIn({
   back,
   complete,
+  notice,
   openDemo,
   signup,
   resetPassword,
@@ -884,13 +893,14 @@ function SignIn({
 }: {
   back: () => void;
   complete: (email: string, password: string) => Promise<string | null>;
+  notice?: SignInNotice;
   openDemo?: () => Promise<void>;
   signup: () => void;
   resetPassword: (email: string) => void;
   allowSandboxReset: boolean;
   role: Role;
 }) {
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(notice?.email ?? "");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -935,6 +945,12 @@ function SignIn({
               : "Sign in to book classes and manage your Blush routine."}
           </Text>
         </View>
+        {notice ? (
+          <View style={s.demoNote} accessibilityLiveRegion="polite">
+            <Text style={s.whyLabel}>{notice.title}</Text>
+            <Text style={s.whyCopy}>{notice.message}</Text>
+          </View>
+        ) : null}
         <View style={s.form}>
           <Text style={s.label}>EMAIL</Text>
           <TextInput
@@ -1172,14 +1188,16 @@ function PasswordResetRequest({
   back,
   initialEmail,
   send,
+  signup,
 }: {
   back: () => void;
   initialEmail?: string;
   send: (email: string) => Promise<string | null>;
+  signup: (email: string) => void;
 }) {
   const [email, setEmail] = useState(initialEmail ?? "");
   const [error, setError] = useState("");
-  const [sent, setSent] = useState(false);
+  const [requestedEmail, setRequestedEmail] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const submit = async () => {
     if (submitting) return;
@@ -1196,7 +1214,7 @@ function PasswordResetRequest({
         setError(message);
         return;
       }
-      setSent(true);
+      setRequestedEmail(normalizedEmail);
     } finally {
       setSubmitting(false);
     }
@@ -1221,61 +1239,61 @@ function PasswordResetRequest({
         </View>
         <View style={s.signinCopy}>
           <Text style={s.signinTitle}>
-            {sent ? "Check your email" : "Reset your password"}
+            {requestedEmail ? "Request received" : "Reset your password"}
           </Text>
           <Text style={s.sub}>
-            {sent
-              ? `We sent password recovery instructions to ${email.trim().toLowerCase()}.`
-              : "Enter your account email and we will send you a secure password reset link."}
+            {requestedEmail
+              ? `A reset link is sent only if ${requestedEmail} belongs to a Blush Bodies account.`
+              : "Enter the email address you used to sign up."}
           </Text>
         </View>
-        {sent ? (
-          <View style={s.form}>
-            <View style={s.demoNote}>
-              <Text style={s.whyLabel}>RECOVERY EMAIL SENT</Text>
-              <Text style={s.whyCopy}>
-                Open the latest Blush Bodies email on this device. If it does
-                not arrive, check spam or request another link.
-              </Text>
-            </View>
+        <View style={s.form}>
+          {requestedEmail ? (
             <Main label="Back to Sign In" onPress={back} />
+          ) : (
+            <>
+              <Text style={s.label}>ACCOUNT EMAIL</Text>
+              <TextInput
+                accessibilityLabel="Account email"
+                editable={!submitting}
+                value={email}
+                onChangeText={(value) => {
+                  setEmail(value);
+                  setError("");
+                }}
+                autoCapitalize="none"
+                autoCorrect={false}
+                autoComplete="email"
+                textContentType="emailAddress"
+                keyboardType="email-address"
+                maxLength={254}
+                placeholder="you@email.com"
+                placeholderTextColor={C.muted}
+                style={s.formInput}
+              />
+              {error ? <Text style={s.formError}>{error}</Text> : null}
+              <Main
+                label={submitting ? "Requesting Reset Link..." : "Send Reset Link"}
+                onPress={submit}
+              />
+            </>
+          )}
+          <Outline
+            label="Create an account"
+            onPress={() => signup(email.trim().toLowerCase())}
+          />
+          {requestedEmail ? (
             <Pressable
               accessibilityRole="button"
               onPress={() => {
-                setSent(false);
+                setRequestedEmail(null);
                 setError("");
               }}
             >
               <Text style={s.forgot}>Use a different email</Text>
             </Pressable>
-          </View>
-        ) : (
-          <View style={s.form}>
-            <Text style={s.label}>ACCOUNT EMAIL</Text>
-            <TextInput
-              accessibilityLabel="Account email"
-              value={email}
-              onChangeText={(value) => {
-                setEmail(value);
-                setError("");
-              }}
-              autoCapitalize="none"
-              autoCorrect={false}
-              autoComplete="email"
-              textContentType="emailAddress"
-              keyboardType="email-address"
-              maxLength={254}
-              placeholder="you@email.com"
-              placeholderTextColor={C.muted}
-              style={s.formInput}
-            />
-            {error ? <Text style={s.formError}>{error}</Text> : null}
-            <Main
-              label={submitting ? "Sending Reset Link..." : "Send Reset Link"}
-              onPress={submit}
-            />
-          </View>
-        )}
+          ) : null}
+        </View>
       </ScrollView>
     </View>
   );
@@ -1385,14 +1403,16 @@ function RecoveryPasswordReset({
 function SignUp({
   back,
   complete,
+  initialEmail,
   role,
 }: {
   back: () => void;
   complete: (account: Account, password: string) => Promise<string | null>;
+  initialEmail?: string;
   role: Role;
 }) {
   const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(initialEmail ?? "");
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [error, setError] = useState("");
@@ -5672,7 +5692,7 @@ function TeachingSession({
 function BlushBodiesApp() {
   const [screen, setScreen] = useState<Screen>("welcome");
   const [signupReturnScreen, setSignupReturnScreen] = useState<
-    "welcome" | "signin"
+    "welcome" | "signin" | "forgotPassword"
   >("welcome");
   const [tab, setTab] = useState<Tab>("home");
   const [account, setAccount] = useState<Account>({
@@ -5746,6 +5766,7 @@ function BlushBodiesApp() {
     });
   const [signedIn, setSignedIn] = useState(false);
   const [authReady, setAuthReady] = useState(!supabaseConfigured);
+  const [signInNotice, setSignInNotice] = useState<SignInNotice>();
   const [resetEmail, setResetEmail] = useState("");
   const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "error">(
     "saved",
@@ -6619,9 +6640,17 @@ function BlushBodiesApp() {
       );
     }
     await loadWorkspace(owner);
+    setSignInNotice(undefined);
     setSignedIn(true);
     setTab("home");
     setScreen("home");
+  };
+  const showUnavailableAuthLink = () => {
+    setSignInNotice({
+      title: "Email link unavailable",
+      message: "This email link has expired or is invalid. Use Forgot password to request a new reset link.",
+    });
+    setScreen("signin");
   };
   useEffect(() => {
     if (!supabaseConfigured || !supabase) return;
@@ -6629,9 +6658,24 @@ function BlushBodiesApp() {
     void supabase.auth
       .getSession()
       .then(async ({ data, error }) => {
+        if (!active) return;
+        const url = takeInitialWebAuthUrl();
+        if (url && isExpiredAuthLink(url)) {
+          showUnavailableAuthLink();
+          return;
+        }
+        const tokens = url ? authTokensFromUrl(url) : null;
+        if (tokens?.type === "recovery") {
+          // Only enter recovery for the session Supabase accepted from this link.
+          if (!error && data.session?.access_token === tokens.accessToken) {
+            setScreen("recoverPassword");
+          } else {
+            showUnavailableAuthLink();
+          }
+          return;
+        }
         if (error) throw error;
-        if (active && data.session?.user)
-          await connectRemoteAccount(data.session.user);
+        if (data.session?.user) await connectRemoteAccount(data.session.user);
       })
       .catch(() => {
         if (active) {
@@ -6650,6 +6694,7 @@ function BlushBodiesApp() {
       if (event !== "SIGNED_OUT") return;
       remoteWorkspaceId.current = null;
       remoteWorkspaceRevision.current = 0;
+      setSignInNotice(undefined);
       setSignedIn(false);
       setScreen("welcome");
     });
@@ -6664,14 +6709,19 @@ function BlushBodiesApp() {
     let active = true;
     const openAuthLink = async (url?: string | null) => {
       if (!active || !url) return;
+      if (isExpiredAuthLink(url)) {
+        showUnavailableAuthLink();
+        return;
+      }
       const tokens = authTokensFromUrl(url);
       if (!tokens) return;
       const { error } = await client.auth.setSession({
         access_token: tokens.accessToken,
         refresh_token: tokens.refreshToken,
       });
-      if (error || !active) return;
-      if (tokens.type === "recovery") setScreen("recoverPassword");
+      if (!active) return;
+      if (error) showUnavailableAuthLink();
+      else if (tokens.type === "recovery") setScreen("recoverPassword");
       else setScreen("signin");
     };
     void Linking.getInitialURL().then(openAuthLink);
@@ -6770,10 +6820,11 @@ function BlushBodiesApp() {
         });
         if (error) return error.message;
         if (!data.session || !data.user) {
-          Alert.alert(
-            "Confirm your email",
-            "Open the verification email from Supabase, then return here and sign in.",
-          );
+          setSignInNotice({
+            title: "Confirm your email",
+            message: "Open the verification email from Blush Bodies to finish signing up, then sign in.",
+            email: newAccount.email,
+          });
           setScreen("signin");
           return null;
         }
@@ -6876,7 +6927,17 @@ function BlushBodiesApp() {
       const { data, error } = await client.auth.updateUser({ password });
       if (error || !data.user)
         return error?.message ?? "The recovered account could not be updated.";
-      await connectRemoteAccount(data.user);
+      try {
+        await connectRemoteAccount(data.user);
+      } catch {
+        setSignInNotice({
+          title: "Password updated",
+          message: "Sign in with your new password to open your workspace.",
+          email: data.user.email,
+        });
+        setScreen("signin");
+        return null;
+      }
       Alert.alert("Password updated", "Your account is ready to use.");
       return null;
     } catch {
@@ -7231,18 +7292,24 @@ function BlushBodiesApp() {
     return (
       <SignIn
         role="instructor"
+        notice={signInNotice}
         allowSandboxReset={ALLOW_SANDBOX_PASSWORD_RESET && !supabaseConfigured}
         openDemo={
           ALLOW_SANDBOX_PASSWORD_RESET && !supabaseConfigured
             ? openDemoWorkspace
             : undefined
         }
-        back={() => setScreen("welcome")}
+        back={() => {
+          setSignInNotice(undefined);
+          setScreen("welcome");
+        }}
         signup={() => {
+          setSignInNotice(undefined);
           setSignupReturnScreen("signin");
           setScreen("signup");
         }}
         resetPassword={(email) => {
+          setSignInNotice(undefined);
           setResetEmail(email);
           if (supabaseConfigured) {
             setScreen("forgotPassword");
@@ -7261,6 +7328,11 @@ function BlushBodiesApp() {
         initialEmail={resetEmail}
         back={() => setScreen("signin")}
         send={requestRemotePasswordReset}
+        signup={(email) => {
+          setResetEmail(email);
+          setSignupReturnScreen("forgotPassword");
+          setScreen("signup");
+        }}
       />
     );
   if (screen === "resetPassword")
@@ -7277,8 +7349,8 @@ function BlushBodiesApp() {
   if (screen === "recoverPassword")
     return (
       <RecoveryPasswordReset
-        back={() => {
-          void requireSupabase().auth.signOut();
+        back={async () => {
+          await requireSupabase().auth.signOut({ scope: "local" });
           setScreen("signin");
         }}
         complete={updateRecoveredPassword}
@@ -7288,6 +7360,9 @@ function BlushBodiesApp() {
     return (
       <SignUp
         role="instructor"
+        initialEmail={
+          signupReturnScreen === "forgotPassword" ? resetEmail : undefined
+        }
         back={() => setScreen(signupReturnScreen)}
         complete={register}
       />

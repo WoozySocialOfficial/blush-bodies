@@ -36,6 +36,7 @@ import {
 import {
   authRedirectUrl,
   authTokensFromUrl,
+  isExpiredAuthLink,
   passwordResetErrorMessage,
 } from "../src/authLinks.ts";
 
@@ -85,6 +86,9 @@ test("auth links use stable platform redirects and recover Supabase tokens", () 
     { accessToken: "access", refreshToken: "refresh", type: "recovery" },
   );
   assert.equal(authTokensFromUrl("blushbodies://auth?type=signup"), null);
+  assert.equal(isExpiredAuthLink("blushbodies://auth?error_code=otp_expired"), true);
+  assert.equal(isExpiredAuthLink("https://example.com/#error_code=otp_expired"), true);
+  assert.equal(isExpiredAuthLink("https://example.com/#type=recovery"), false);
 });
 
 test("password recovery errors give users an actionable message", () => {
