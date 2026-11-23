@@ -1822,9 +1822,92 @@ function InstructorHome({
             slot.planId && planTitle && !inProgress && !completed,
           );
           const hasDraft = !ready && slot.status === "DRAFT";
+          const card = (
+            <Pressable
+              key={slot.id}
+              onPress={() => {
+                if (completed) {
+                  review(slot);
+                } else if (!swipeIsBlocked(slot.id)) {
+                  if (ready || inProgress) start(slot);
+                  else assign(slot);
+                }
+              }}
+              style={[s.classCard, s.classCardShape]}
+              accessibilityRole="button"
+              accessibilityLabel={`${slot.level} class at ${slot.time}, ${planTitle ?? slot.lesson}, ${completed ? "completed" : ready || inProgress ? inProgress ? "in progress" : "ready to teach" : hasDraft ? "draft available" : "plan needed"}`}
+            >
+              <View
+                style={[
+                  s.rail,
+                  ready || inProgress ? s.readyRail : s.planRail,
+                  completed && s.completedRail,
+                ]}
+              />
+              <View style={s.time}>
+                <Text style={s.timeText}>{slot.time}</Text>
+                <Text style={s.duration}>45 min</Text>
+              </View>
+              <View style={s.flex}>
+                <Text style={s.level}>{slot.level}</Text>
+                <Text style={s.week}>{planTitle ?? slot.lesson}</Text>
+                <Text style={s.duration}>
+                  {classDateLabel(slot.date, true)}
+                </Text>
+              </View>
+              <View style={s.action}>
+                {completed ? (
+                  <>
+                    <Pill label="COMPLETED" active green />
+                    <View style={s.reviewCompact}>
+                      <BarChart3 size={13} color={C.rose} />
+                      <Text style={s.reviewCompactText}>Review</Text>
+                    </View>
+                  </>
+                ) : ready || inProgress ? (
+                  <>
+                    <Pill
+                      label={inProgress ? "IN PROGRESS" : "READY"}
+                      active
+                      green
+                    />
+                    <View style={s.start}>
+                      <Play size={14} color={C.white} fill={C.white} />
+                      <Text style={s.startText}>
+                        {inProgress ? "Resume" : "Start"}
+                      </Text>
+                    </View>
+                  </>
+                ) : (
+                  <View style={s.planNeededAction}>
+                    <Text
+                      style={[
+                        s.planNeededText,
+                        hasDraft && s.planDraftText,
+                      ]}
+                    >
+                      {hasDraft ? "DRAFT AVAILABLE" : "PLAN NEEDED"}
+                    </Text>
+                    <Pressable
+                      onPress={() => {
+                        if (!swipeIsBlocked(slot.id)) assign(slot);
+                      }}
+                      style={s.assignCompact}
+                    >
+                      <CalendarDays size={13} color={C.white} />
+                      <Text style={s.assignCompactText}>Assign</Text>
+                    </Pressable>
+                  </View>
+                )}
+              </View>
+            </Pressable>
+          );
+          if (completed) return card;
           return (
             <Swipeable
               key={slot.id}
+              containerStyle={s.classCardShape}
+              childrenContainerStyle={s.swipeCardContent}
               overshootRight={false}
               rightThreshold={64}
               dragOffsetFromRight={-18}
@@ -1859,81 +1942,7 @@ function InstructorHome({
                 </View>
               )}
             >
-              <Pressable
-                onPress={() => {
-                  if (swipeIsBlocked(slot.id)) return;
-                  if (ready || inProgress) start(slot);
-                  else if (completed) review(slot);
-                  else assign(slot);
-                }}
-                style={[s.classCard, completed && s.completedClassCard]}
-                accessibilityRole="button"
-                accessibilityLabel={`${slot.level} class at ${slot.time}, ${planTitle ?? slot.lesson}, ${completed ? "completed" : ready || inProgress ? inProgress ? "in progress" : "ready to teach" : hasDraft ? "draft available" : "plan needed"}`}
-              >
-                <View
-                  style={[
-                    s.rail,
-                    ready || inProgress ? s.readyRail : s.planRail,
-                    completed && s.completedRail,
-                  ]}
-                />
-                <View style={s.time}>
-                  <Text style={s.timeText}>{slot.time}</Text>
-                  <Text style={s.duration}>45 min</Text>
-                </View>
-                <View style={s.flex}>
-                  <Text style={s.level}>{slot.level}</Text>
-                  <Text style={s.week}>{planTitle ?? slot.lesson}</Text>
-                  <Text style={s.duration}>
-                    {classDateLabel(slot.date, true)}
-                  </Text>
-                </View>
-                <View style={s.action}>
-                  {completed ? (
-                    <>
-                      <Pill label="COMPLETED" active green />
-                      <View style={s.reviewCompact}>
-                        <BarChart3 size={13} color={C.rose} />
-                        <Text style={s.reviewCompactText}>Review</Text>
-                      </View>
-                    </>
-                  ) : ready || inProgress ? (
-                    <>
-                      <Pill
-                        label={inProgress ? "IN PROGRESS" : "READY"}
-                        active
-                        green
-                      />
-                      <View style={s.start}>
-                        <Play size={14} color={C.white} fill={C.white} />
-                        <Text style={s.startText}>
-                          {inProgress ? "Resume" : "Start"}
-                        </Text>
-                      </View>
-                    </>
-                  ) : (
-                    <View style={s.planNeededAction}>
-                      <Text
-                        style={[
-                          s.planNeededText,
-                          hasDraft && s.planDraftText,
-                        ]}
-                      >
-                        {hasDraft ? "DRAFT AVAILABLE" : "PLAN NEEDED"}
-                      </Text>
-                      <Pressable
-                        onPress={() => {
-                          if (!swipeIsBlocked(slot.id)) assign(slot);
-                        }}
-                        style={s.assignCompact}
-                      >
-                        <CalendarDays size={13} color={C.white} />
-                        <Text style={s.assignCompactText}>Assign</Text>
-                      </Pressable>
-                    </View>
-                  )}
-                </View>
-              </Pressable>
+              {card}
             </Swipeable>
           );
         })}
@@ -8261,20 +8270,17 @@ const s = StyleSheet.create({
     width: "100%",
     minWidth: 0,
     minHeight: 86,
-    borderRadius: 15,
     backgroundColor: C.card,
     flexDirection: "row",
     alignItems: "center",
-    overflow: "hidden",
     gap: 11,
     paddingRight: 16,
   },
-  completedClassCard: { opacity: 0.72 },
+  classCardShape: { borderRadius: 15, overflow: "hidden" },
+  swipeCardContent: { backgroundColor: C.card },
   swipeActions: {
     width: 156,
     flexDirection: "row",
-    overflow: "hidden",
-    borderRadius: 8,
   },
   swipeEdit: {
     flex: 1,
