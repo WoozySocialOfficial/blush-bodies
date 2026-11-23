@@ -40,3 +40,8 @@ export const requireSupabase = (): SupabaseClient => {
     );
   return supabase;
 };
+
+export const deleteCurrentAccount = async () => {
+  const { error } = await requireSupabase().rpc("delete_my_account");
+  if (error) throw error;
+};

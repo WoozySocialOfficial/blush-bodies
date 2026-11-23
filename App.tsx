@@ -14,6 +14,7 @@ import {
   saveRemoteWorkspaceState,
 } from "./src/remoteWorkspace";
 import {
+  deleteCurrentAccount,
   requireSupabase,
   supabase,
   supabaseConfigured,
@@ -98,6 +99,7 @@ import {
   Heart,
   House,
   ImagePlus,
+  Info,
   LibraryBig,
   List,
   Pause,
@@ -113,8 +115,10 @@ import {
   TriangleAlert,
 } from "lucide-react-native";
 import {
+  createContext,
   memo,
   useCallback,
+  useContext,
   useDeferredValue,
   useEffect,
   useMemo,
@@ -122,7 +126,6 @@ import {
   useState,
 } from "react";
 import {
-  Alert,
   Animated,
   AppState,
   Easing,
@@ -420,9 +423,12 @@ const shareCalendarEvent = async (scheduledClass: ScheduledClass) => {
     UTI: "public.ics",
   });
 };
-const addClassToCalendar = (scheduledClass: ScheduledClass) => {
+const addClassToCalendar = (
+  scheduledClass: ScheduledClass,
+  showAlert: AppDialogControls["showAlert"],
+) => {
   const handleError = () =>
-    Alert.alert(
+    showAlert(
       "Calendar unavailable",
       "The class could not be opened in a calendar. Please try again.",
     );
@@ -430,7 +436,7 @@ const addClassToCalendar = (scheduledClass: ScheduledClass) => {
     void openGoogleCalendar(scheduledClass).catch(handleError);
     return;
   }
-  Alert.alert(
+  showAlert(
     "Add to calendar",
     `${classDateLabel(scheduledClass.date, true)} at ${scheduledClass.time}`,
     [
@@ -495,33 +501,40 @@ const MOVEMENT_POSITIONS = [
   "Supine",
   "Prone",
 ];
-const confirmAction = ({
-  title,
-  message,
-  confirmText,
-  onConfirm,
-  cancelText = "Cancel",
-  destructive = false,
-}: {
+type DialogAction = {
+  text: string;
+  style?: "cancel" | "destructive";
+  onPress?: () => void;
+};
+type ConfirmationRequest = {
   title: string;
   message: string;
   confirmText: string;
   onConfirm: () => void;
   cancelText?: string;
   destructive?: boolean;
-}) => {
-  if (Platform.OS === "web") {
-    if (globalThis.confirm(`${title}\n\n${message}`)) onConfirm();
-    return;
-  }
-  Alert.alert(title, message, [
-    { text: cancelText, style: "cancel" },
-    {
-      text: confirmText,
-      style: destructive ? "destructive" : "default",
-      onPress: onConfirm,
-    },
-  ]);
+  Icon?: typeof Trash2;
+};
+type AppDialogControls = {
+  showAlert: (
+    title: string,
+    message: string,
+    actions?: DialogAction[],
+    Icon?: typeof Trash2,
+  ) => void;
+  confirmAction: (request: ConfirmationRequest) => void;
+};
+type AppDialogContent = {
+  title: string;
+  message: string;
+  actions: DialogAction[];
+  Icon: typeof Trash2;
+};
+const AppDialogContext = createContext<AppDialogControls | null>(null);
+const useAppDialog = () => {
+  const controls = useContext(AppDialogContext);
+  if (!controls) throw new Error("AppDialogProvider is required.");
+  return controls;
 };
 const initialLibrary: LibraryMovement[] = additionalMovements;
 const initialSchedule: ScheduledClass[] = [];
@@ -759,6 +772,116 @@ function Outline({ label, onPress }: { label: string; onPress: () => void }) {
     >
       <Text style={s.outlineText}>{label}</Text>
     </Pressable>
+  );
+}
+function AppDialog({
+  content: { title, message, actions, Icon },
+  onSelect,
+}: {
+  content: AppDialogContent;
+  onSelect: (action?: DialogAction) => void;
+}) {
+  const destructive = actions.some((action) => action.style === "destructive");
+  const close = () => onSelect(
+    actions.find((action) => action.style === "cancel") ??
+    (actions.length === 1 ? actions[0] : undefined),
+  );
+  return (
+    <Modal
+      transparent
+      animationType="fade"
+      onRequestClose={close}
+      accessibilityLabel={title}
+    >
+      <View style={[s.choiceBackdrop, s.confirmationBackdrop]}>
+        <ScrollView
+          style={s.confirmationCard}
+          contentContainerStyle={s.confirmationContent}
+          onAccessibilityEscape={close}
+          accessibilityViewIsModal
+          bounces={false}
+        >
+          <View style={s.confirmationIcon}>
+            <Icon size={21} color={destructive ? "#A34848" : C.rose} />
+          </View>
+          <View style={s.signinCopy}>
+            <Text accessibilityRole="header" style={s.headerTitle}>
+              {title}
+            </Text>
+            <Text style={s.confirmationCopy}>{message}</Text>
+          </View>
+          <View style={s.form}>
+            {actions.map((action) =>
+              action.style === "cancel" ? (
+                <Outline
+                  key={action.text}
+                  label={action.text}
+                  onPress={() => onSelect(action)}
+                />
+              ) : (
+                <Pressable
+                  key={action.text}
+                  accessibilityRole="button"
+                  onPress={() => onSelect(action)}
+                  style={[
+                    s.main,
+                    action.style === "destructive" && s.confirmationDestructive,
+                  ]}
+                >
+                  <Text style={s.mainText}>{action.text}</Text>
+                </Pressable>
+              ),
+            )}
+          </View>
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+function AppDialogProvider({ children }: { children: React.ReactNode }) {
+  const queue = useRef<AppDialogContent[]>([]);
+  const [visible, setVisible] = useState<AppDialogContent | null>(null);
+  const controls = useMemo<AppDialogControls>(() => {
+    const showAlert: AppDialogControls["showAlert"] = (
+      title, message, actions = [{ text: "OK" }], Icon = Info,
+    ) => {
+      const pending = queue.current;
+      if (pending.some((dialog) => dialog.title === title && dialog.message === message)) return;
+      const content = { title, message, actions, Icon };
+      pending.push(content);
+      if (pending.length === 1) setVisible(content);
+    };
+    return {
+      showAlert,
+      confirmAction: ({
+        title, message, confirmText, onConfirm, cancelText = "Cancel", destructive, Icon,
+      }) => showAlert(
+        title,
+        message,
+        [
+          { text: cancelText, style: "cancel" },
+          { text: confirmText, style: destructive ? "destructive" : undefined, onPress: onConfirm },
+        ],
+        Icon ?? TriangleAlert,
+      ),
+    };
+  }, []);
+  return (
+    <AppDialogContext.Provider value={controls}>
+      {children}
+      {visible ? (
+        <AppDialog
+          content={visible}
+          onSelect={(action) => {
+            const pending = queue.current;
+            if (pending[0] !== visible) return;
+            pending.shift();
+            setVisible(pending[0] ?? null);
+            action?.onPress?.();
+          }}
+        />
+      ) : null}
+    </AppDialogContext.Provider>
   );
 }
 function UndoBanner({
@@ -1044,6 +1167,7 @@ function SandboxPasswordReset({
   role: Role;
   initialEmail?: string;
 }) {
+  const { showAlert } = useAppDialog();
   const [email, setEmail] = useState(initialEmail ?? "");
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
@@ -1072,17 +1196,11 @@ function SandboxPasswordReset({
         setError(message);
         return;
       }
-      if (Platform.OS === "web") {
-        globalThis.alert(
-          "Your local test password was updated. You can sign in now.",
-        );
-        back();
-        return;
-      }
-      Alert.alert(
+      showAlert(
         "Test password reset",
         "Your local password was updated. You can sign in now.",
         [{ text: "Sign In", onPress: back }],
+        Check,
       );
     } finally {
       setSubmitting(false);
@@ -1854,6 +1972,7 @@ function AssignPlan({
   scheduleNext: () => void;
   openSchedule: () => void;
 }) {
+  const { confirmAction } = useAppDialog();
   const now = useLiveNow();
   const target = schedule.find((slot) => slot.id === targetSlotId);
   const reviewedPlans = [plan, ...savedPlans]
@@ -2052,6 +2171,7 @@ function ScheduleManager({
   cancel: (slot: ScheduledClass) => void;
   remove: (id: string) => void;
 }) {
+  const { confirmAction, showAlert } = useAppDialog();
   const [date, setDate] = useState(dateKeyFromOffset(1));
   const [time, setTime] = useState("09:00");
   const [level, setLevel] = useState("Beginner");
@@ -2329,7 +2449,7 @@ function ScheduleManager({
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={`Add ${slot.level} class to calendar`}
-                onPress={() => addClassToCalendar(slot)}
+                onPress={() => addClassToCalendar(slot, showAlert)}
                 hitSlop={10}
               >
                 <CalendarPlus size={18} color={C.rose} />
@@ -2453,6 +2573,7 @@ function Create({
   generate: (brief: PlanBrief, fromScratch: boolean) => void;
   initialClass?: ScheduledClass;
 }) {
+  const { showAlert } = useAppDialog();
   const programs = [
     "Beginner Foundations",
     "Intermediate Flow",
@@ -2510,18 +2631,18 @@ function Create({
   const submit = () => {
     const cleanTime = scheduledTime.trim();
     if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(cleanTime)) {
-      Alert.alert("Check start time", "Use 24-hour time such as 09:30.");
+      showAlert("Check start time", "Use 24-hour time such as 09:30.");
       return;
     }
     const start = dateFromKey(scheduledDate);
     const [hours, minutes] = cleanTime.split(":").map(Number);
     start.setHours(hours, minutes, 0, 0);
     if (start.getTime() <= Date.now()) {
-      Alert.alert("Choose a future class", "Select a future date and time.");
+      showAlert("Choose a future class", "Select a future date and time.");
       return;
     }
     if (!equipment.length) {
-      Alert.alert(
+      showAlert(
         "Choose equipment",
         "Select at least one available item before generating the plan.",
       );
@@ -2715,6 +2836,7 @@ function Generated({
   schedulePlan: () => void;
   teach: () => void;
 }) {
+  const { showAlert } = useAppDialog();
   const now = useLiveNow();
   const readiness = classReadiness(plan, library);
   const valid = readiness.ready;
@@ -2730,7 +2852,7 @@ function Generated({
   const nextAvailable = nextAvailableClassSlot(schedule, now);
   const start = () => {
     if (!valid) {
-      Alert.alert(
+      showAlert(
         "Plan needs review",
         "Resolve the class readiness issues before starting this class.",
       );
@@ -2738,7 +2860,7 @@ function Generated({
       return;
     }
     if (plan.status !== "saved") {
-      Alert.alert(
+      showAlert(
         "Save this plan first",
         "Review and save the exact sequence before entering Teach Mode.",
       );
@@ -2885,6 +3007,7 @@ function Classes({
   const visible = plan.movements
     .map((movement, index) => ({ movement, index }))
     .filter((item) => filter === "All" || item.movement.phase === filter);
+  const { showAlert } = useAppDialog();
   const valid = classReadiness(plan, library).ready;
   const mode = plan.sequenceMode ?? "auto";
   const phase = filter === "All" ? nextPlanningPhase(plan) : filter;
@@ -2912,7 +3035,7 @@ function Classes({
   const replace = (index: number) => {
     const next = replaceCatalogueMovement(plan, index, library, Crypto.randomUUID());
     if (next === plan.movements) {
-      Alert.alert("No replacement available", "Add or review another movement for this phase and class level.");
+      showAlert("No replacement available", "Add or review another movement for this phase and class level.");
       return;
     }
     applyChange(next);
@@ -3249,6 +3372,7 @@ function Plans({
   deletedCount: number;
   openDeleted: () => void;
 }) {
+  const { confirmAction } = useAppDialog();
   const now = useLiveNow();
   const confirmDeleteDraft = () =>
     confirmAction({
@@ -3461,6 +3585,7 @@ function RecentlyDeleted({
   restore: (item: RecentlyDeletedItem) => void;
   remove: (id: string) => void;
 }) {
+  const { confirmAction } = useAppDialog();
   const now = useLiveNow().getTime();
   const visible = useMemo(
     () =>
@@ -3624,6 +3749,7 @@ function Details({
   review: () => void;
   remove: () => void;
 }) {
+  const { confirmAction } = useAppDialog();
   const [phase, setPhase] = useState<Phase>(initialPhase ?? movement.phases?.[0] ?? "Main");
   const [side, setSide] = useState<SideSelection>("both");
   const remaining = phaseRemaining(plan, phase);
@@ -4585,6 +4711,7 @@ function Profile({
   logout: () => void;
   saveStatus: "saved" | "saving" | "error";
 }) {
+  const { showAlert } = useAppDialog();
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(account.name);
   const [email, setEmail] = useState(account.email);
@@ -4804,7 +4931,7 @@ function Profile({
           </Pressable>
           <Pressable
             onPress={() =>
-              Alert.alert(
+              showAlert(
                 "Help & Support",
                 "Email support@blushbodies.com for assistance.",
               )
@@ -4840,6 +4967,7 @@ function ChangePassword({
     newPassword: string,
   ) => Promise<string | null>;
 }) {
+  const { showAlert } = useAppDialog();
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
@@ -4871,17 +4999,11 @@ function ChangePassword({
         setError(message);
         return;
       }
-      if (Platform.OS === "web") {
-        globalThis.alert(
-          "Password updated. Use your new password the next time you sign in.",
-        );
-        back();
-        return;
-      }
-      Alert.alert(
+      showAlert(
         "Password updated",
         "Use your new password the next time you sign in.",
         [{ text: "Done", onPress: back }],
+        Check,
       );
     } finally {
       setSubmitting(false);
@@ -4972,6 +5094,7 @@ function DataSettings({
   backup,
   restoreBackup,
   reset,
+  deleteAccount,
   sharedWorkspace,
 }: {
   savedPlans: number;
@@ -4982,21 +5105,41 @@ function DataSettings({
   backup: () => Promise<void>;
   restoreBackup: () => Promise<void>;
   reset: () => void;
+  deleteAccount?: () => Promise<string | null>;
   sharedWorkspace: boolean;
 }) {
+  const { confirmAction } = useAppDialog();
   const [backingUp, setBackingUp] = useState(false);
   const [restoring, setRestoring] = useState(false);
-  const confirmReset = () =>
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const confirmReset = () => confirmAction({
+    title: sharedWorkspace ? "Clear local cache?" : "Permanently delete your account?",
+    message: sharedWorkspace
+      ? "This clears the cache on this device and signs you out. Sign in again to reload your workspace."
+      : "This permanently removes this account, saved plans, schedules, custom movements, insights, profile details and preferences from this device.",
+    confirmText: sharedWorkspace ? "Clear and sign out" : "Delete Account",
+    onConfirm: reset,
+    Icon: Trash2,
+    destructive: true,
+  });
+  const confirmDelete = () => {
+    if (!deleteAccount || deleting || backingUp || restoring) return;
     confirmAction({
-      title: "Delete this account and its data?",
-      message:
-        sharedWorkspace
-          ? "This removes the local cache and signs out. Shared workspace data and the Supabase account are not deleted."
-          : "This permanently removes this account, saved plans, schedules, custom movements, insights, profile details and preferences from this device.",
-      confirmText: sharedWorkspace ? "Clear and sign out" : "Delete account",
+      title: "Permanently delete your account?",
+      message: "Your Blush Bodies account and private workspaces will be permanently deleted. Shared workspaces will stay available to their remaining instructors.",
+      confirmText: "Delete Account",
+      onConfirm: () => {
+        setDeleting(true);
+        setDeleteError("");
+        void deleteAccount()
+          .then((message) => setDeleteError(message ?? ""))
+          .finally(() => setDeleting(false));
+      },
+      Icon: Trash2,
       destructive: true,
-      onConfirm: reset,
     });
+  };
   const counts = [
     [savedPlans, "Saved plans"],
     [schedule, "Classes"],
@@ -5005,7 +5148,7 @@ function DataSettings({
   ] as const;
   return (
     <ScrollView contentContainerStyle={s.page}>
-      <Header title="App Data" back={back} />
+      <Header title="App Data & Reset" back={deleting ? undefined : back} />
       <Text style={s.sub}>
         {sharedWorkspace
           ? "Your shared workspace syncs through Supabase and keeps an offline cache on this device."
@@ -5031,7 +5174,7 @@ function DataSettings({
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Export a backup of this workspace"
-        disabled={backingUp}
+        disabled={backingUp || deleting}
         onPress={() => {
           if (backingUp) return;
           setBackingUp(true);
@@ -5052,7 +5195,7 @@ function DataSettings({
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Restore this workspace from a backup file"
-        disabled={restoring}
+        disabled={restoring || deleting}
         onPress={() => {
           if (restoring) return;
           setRestoring(true);
@@ -5071,12 +5214,34 @@ function DataSettings({
         </View>
       </Pressable>
       <Text style={s.group}>{sharedWorkspace ? "LOCAL CACHE" : "DELETE ACCOUNT"}</Text>
-      <Pressable onPress={confirmReset} style={s.dangerAction}>
+      <Pressable
+        accessibilityRole="button"
+        disabled={deleting}
+        onPress={confirmReset}
+        style={s.dangerAction}
+      >
         <Trash2 size={19} color="#A34848" />
         <Text style={s.dangerText}>
           {sharedWorkspace ? "Clear local cache and sign out" : "Delete account and local data"}
         </Text>
       </Pressable>
+      {deleteAccount ? (
+        <>
+          <Text style={s.group}>DELETE ACCOUNT</Text>
+          <Pressable
+            accessibilityRole="button"
+            disabled={deleting || backingUp || restoring}
+            onPress={confirmDelete}
+            style={[s.dangerAction, deleting && s.actionDisabled]}
+          >
+            <Trash2 size={19} color="#A34848" />
+            <Text style={s.dangerText}>{deleting ? "Deleting Account..." : "Delete Account"}</Text>
+          </Pressable>
+          {deleteError ? (
+            <Text style={s.formError} accessibilityLiveRegion="polite">{deleteError}</Text>
+          ) : null}
+        </>
+      ) : null}
     </ScrollView>
   );
 }
@@ -5100,6 +5265,7 @@ function ManagePlan({
   rename: (name: string) => void;
   remove: () => void;
 }) {
+  const { confirmAction } = useAppDialog();
   const now = useLiveNow();
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(plan.brief.program);
@@ -5248,6 +5414,7 @@ function TeachingSession({
   checkpoint: (session: ActiveTeachingSession) => void;
   finish: (result: SessionResult) => void;
 }) {
+  const { confirmAction } = useAppDialog();
   const { height: viewportHeight, width: viewportWidth } = useWindowDimensions();
   const safeArea = useSafeAreaInsets();
   const veryCompactTeachingView = viewportHeight < 700 || viewportWidth < 350;
@@ -5373,24 +5540,17 @@ function TeachingSession({
   };
   const confirmEnd = () => {
     const completed = index === movements.length - 1;
-    const title = completed ? "Complete class?" : "End class early?";
-    const message = completed
-      ? "This will create the session summary."
-      : "The unfinished movements will be recorded in the summary.";
-
-    if (Platform.OS === "web") {
-      if (globalThis.confirm(`${title}\n\n${message}`)) end(completed);
-      return;
-    }
-
-    Alert.alert(title, message, [
-      { text: "Keep teaching", style: "cancel" },
-      {
-        text: completed ? "Complete" : "End early",
-        style: "destructive",
-        onPress: () => end(completed),
-      },
-    ]);
+    confirmAction({
+      title: completed ? "Complete class?" : "End class early?",
+      message: completed
+        ? "This will create the session summary."
+        : "The unfinished movements will be recorded in the summary.",
+      confirmText: completed ? "Complete Class" : "End Class",
+      cancelText: "Keep teaching",
+      onConfirm: () => end(completed),
+      Icon: completed ? Check : TriangleAlert,
+      destructive: !completed,
+    });
   };
   useEffect(() => {
     lastTickAt.current = Date.now();
@@ -5690,6 +5850,7 @@ function TeachingSession({
 }
 
 function BlushBodiesApp() {
+  const { confirmAction, showAlert } = useAppDialog();
   const [screen, setScreen] = useState<Screen>("welcome");
   const [signupReturnScreen, setSignupReturnScreen] = useState<
     "welcome" | "signin" | "forgotPassword"
@@ -5773,6 +5934,7 @@ function BlushBodiesApp() {
   );
   const [persistenceError, setPersistenceError] = useState("");
   const saveChain = useRef<Promise<void>>(Promise.resolve());
+  const accountDeletionInProgress = useRef(false);
   const saveGeneration = useRef(0);
   const workspaceSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestStoredData = useRef<StoredAppData | null>(null);
@@ -5852,7 +6014,7 @@ function BlushBodiesApp() {
     return task;
   };
   useEffect(() => {
-    if (!signedIn) return;
+    if (!signedIn || accountDeletionInProgress.current) return;
     const stored = storedData();
     latestStoredData.current = stored;
     if (workspaceSaveTimer.current) clearTimeout(workspaceSaveTimer.current);
@@ -5882,8 +6044,8 @@ function BlushBodiesApp() {
   ]);
   useEffect(() => {
     if (!persistenceError) return;
-    Alert.alert("Changes not saved", persistenceError);
-  }, [persistenceError]);
+    showAlert("Changes not saved", persistenceError);
+  }, [persistenceError, showAlert]);
   useEffect(() => {
     if (Platform.OS === "web") return;
     const subscription = AppState.addEventListener("change", (nextState) => {
@@ -6182,7 +6344,7 @@ function BlushBodiesApp() {
       (session) => session.scheduledClassId === slot.id,
     );
     if (!result) {
-      Alert.alert(
+      showAlert(
         "Session record unavailable",
         "This class was completed before detailed session records were enabled.",
       );
@@ -6195,7 +6357,7 @@ function BlushBodiesApp() {
     scheduledClassId?: string,
   ) => {
     if (activeTeachingSession) {
-      Alert.alert(
+      showAlert(
         "Class already in progress",
         "Resume or end the current class before starting another one.",
         [
@@ -6215,7 +6377,7 @@ function BlushBodiesApp() {
     }
     const ordered = sequenceForTeaching(selectedPlan);
     if (!ordered.length) {
-      Alert.alert("Plan is empty", "Add at least one movement before teaching.");
+      showAlert("Plan is empty", "Add at least one movement before teaching.");
       return;
     }
     const startedAt = Date.now();
@@ -6254,7 +6416,7 @@ function BlushBodiesApp() {
     if (!classReadiness(assignedPlan, libraryMovements).ready) {
       setPlan(assignedPlan);
       setHasActiveDraft(false);
-      Alert.alert(
+      showAlert(
         "Plan needs review",
         "Review the timing, sides and movement content before teaching.",
       );
@@ -6588,7 +6750,7 @@ function BlushBodiesApp() {
         raw,
       ).catch(() => undefined);
       resetWorkspace(owner);
-      Alert.alert(
+      showAlert(
         "Workspace recovered",
         "Saved data could not be opened, so a fresh workspace was created. You can restore a backup from Profile > App Data.",
       );
@@ -6938,7 +7100,7 @@ function BlushBodiesApp() {
         setScreen("signin");
         return null;
       }
-      Alert.alert("Password updated", "Your account is ready to use.");
+      showAlert("Password updated", "Your account is ready to use.", undefined, Check);
       return null;
     } catch {
       return "The recovery link may have expired. Request a new link and try again.";
@@ -7011,7 +7173,7 @@ function BlushBodiesApp() {
         setPersistenceError("");
         setSaveStatus("saved");
         if (savedAccount.email !== nextAccount.email)
-          Alert.alert(
+          showAlert(
             "Confirm your new email",
             "Supabase sent confirmation links. Your current email remains active until the change is confirmed.",
           );
@@ -7074,7 +7236,7 @@ function BlushBodiesApp() {
       setSignedIn(false);
       setScreen("welcome");
     } catch {
-      Alert.alert(
+      showAlert(
         "Could not log out safely",
         "Your latest changes are not saved yet. Please try again.",
       );
@@ -7160,7 +7322,7 @@ function BlushBodiesApp() {
         UTI: "public.json",
       });
     } catch (error) {
-      Alert.alert(
+      showAlert(
         "Backup unavailable",
         error instanceof Error
           ? error.message
@@ -7205,7 +7367,7 @@ function BlushBodiesApp() {
                 JSON.stringify(restored),
               );
               await loadWorkspace(account);
-              Alert.alert("Backup restored", "Your workspace is ready to use.");
+              showAlert("Backup restored", "Your workspace is ready to use.", undefined, Check);
             } catch {
               if (previousWorkspace === null)
                 await AsyncStorage.removeItem(key).catch(() => undefined);
@@ -7213,7 +7375,7 @@ function BlushBodiesApp() {
                 await AsyncStorage.setItem(key, previousWorkspace).catch(
                   () => undefined,
                 );
-              Alert.alert(
+              showAlert(
                 "Restore unavailable",
                 "The backup could not be restored. Your current workspace was not changed.",
               );
@@ -7222,12 +7384,66 @@ function BlushBodiesApp() {
         },
       });
     } catch (error) {
-      Alert.alert(
+      showAlert(
         "Backup unavailable",
         error instanceof Error
           ? error.message
           : "The backup could not be opened. Please try again.",
       );
+    }
+  };
+  const clearActiveWorkspace = () => {
+    if (workspaceSaveTimer.current) clearTimeout(workspaceSaveTimer.current);
+    workspaceSaveTimer.current = null;
+    latestStoredData.current = null;
+    remoteWorkspaceId.current = null;
+    remoteWorkspaceRevision.current = 0;
+    signInAttempts.delete(signInAttemptKey(account.role, account.email));
+    setSignedIn(false);
+    resetWorkspace({
+      name: "Blush Bodies Instructor",
+      email: "coach@blushbodies.com",
+      role: "instructor",
+    });
+    setTab("home");
+  };
+  const deleteCloudAccount = async (): Promise<string | null> => {
+    if (accountDeletionInProgress.current) return null;
+    accountDeletionInProgress.current = true;
+    try {
+      const key = userStorageKey(account);
+      const recoveryPrefix = `${WORKSPACE_RECOVERY_PREFIX}${account.role}/${account.email.toLowerCase()}/`;
+      const pendingSave = workspaceSaveTimer.current;
+      if (pendingSave) {
+        clearTimeout(pendingSave);
+        workspaceSaveTimer.current = null;
+        const latest = latestStoredData.current;
+        if (latest) void queueWorkspaceSave(latest).catch(() => undefined);
+      }
+      await saveChain.current;
+      const client = requireSupabase();
+      await deleteCurrentAccount();
+      clearActiveWorkspace();
+      const clearCachedData = async () => {
+        const keys = await AsyncStorage.getAllKeys();
+        await AsyncStorage.multiRemove([key, ...keys.filter((item) => item.startsWith(recoveryPrefix))]);
+      };
+      const cleanup = await Promise.allSettled([
+        clearCachedData(),
+        client.auth.signOut({ scope: "local" }),
+      ]);
+      setSignInNotice({
+        title: "Account deleted",
+        message: cleanup.some((result) => result.status === "rejected")
+          ? "Your account was deleted. This device could not finish clearing its local data."
+          : "You have been signed out of Blush Bodies.",
+      });
+      setScreen("signin");
+      return null;
+    } catch {
+      return "Account deletion could not be confirmed. Check your connection and try again.";
+    } finally {
+      accountDeletionInProgress.current = false;
     }
   };
   const resetAppData = async () => {
@@ -7237,32 +7453,19 @@ function BlushBodiesApp() {
       if (supabaseConfigured) {
         const { error } = await requireSupabase().auth.signOut();
         if (error) throw error;
-        remoteWorkspaceId.current = null;
-        remoteWorkspaceRevision.current = 0;
       } else {
-      const credentials = await readCredentials();
-      await writeCredentials(
-        credentials.filter(
-          (credential) =>
-            !(
-              credential.role === account.role &&
-              credential.email === account.email
+        const credentials = await readCredentials();
+        await writeCredentials(
+          credentials.filter(
+            (credential) =>
+              !(credential.role === account.role && credential.email === account.email),
           ),
-        ),
-      );
+        );
       }
-      signInAttempts.delete(signInAttemptKey(account.role, account.email));
-      latestStoredData.current = null;
-      resetWorkspace({
-        name: "Blush Bodies Instructor",
-        email: "coach@blushbodies.com",
-        role: "instructor",
-      });
-      setSignedIn(false);
-      setTab("home");
+      clearActiveWorkspace();
       setScreen("welcome");
     } catch {
-      Alert.alert(
+      showAlert(
         "Account not deleted",
         "Your account and local data could not be removed. Please try again.",
       );
@@ -7541,6 +7744,7 @@ function BlushBodiesApp() {
           backup={exportWorkspaceBackup}
           restoreBackup={restoreWorkspaceBackup}
           reset={resetAppData}
+          deleteAccount={supabaseConfigured ? deleteCloudAccount : undefined}
           sharedWorkspace={supabaseConfigured}
         />
       </View>
@@ -9308,6 +9512,29 @@ const s = StyleSheet.create({
     justifyContent: "center",
     gap: 8,
   },
+  confirmationBackdrop: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  confirmationCard: {
+    width: "100%",
+    maxWidth: 400,
+    maxHeight: "100%",
+    flexGrow: 0,
+    borderRadius: 20,
+    backgroundColor: C.bg,
+  },
+  confirmationContent: { padding: 24, gap: 16 },
+  confirmationIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: C.pale,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  confirmationCopy: { color: C.muted, fontSize: 14, lineHeight: 21 },
+  confirmationDestructive: { backgroundColor: "#A34848" },
   backupAction: {
     minHeight: 68,
     borderRadius: 14,
@@ -9343,7 +9570,9 @@ export default function App() {
             appWidth !== null && { width: appWidth },
           ]}
         >
-          <BlushBodiesApp />
+          <AppDialogProvider>
+            <BlushBodiesApp />
+          </AppDialogProvider>
         </View>
       </GestureHandlerRootView>
     </SafeAreaProvider>
