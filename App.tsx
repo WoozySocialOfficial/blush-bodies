@@ -43,6 +43,7 @@ import {
   removeScheduleSlot,
   rescheduleSlot,
   scheduleSlotsOverlap,
+  scheduleSlotStartsAt,
   scheduleTimeOptions,
   setScheduleStatus,
   timeFromMinutes,
@@ -60,9 +61,9 @@ import {
   restoreScheduleAssignments,
 } from "./src/recentlyDeleted";
 import {
-  MOVEMENT_DURATION_SECONDS, PHASES, insertMovement, mergeLibraryCatalog, movementSourceId, nextPlanningPhase,
+  MOVEMENT_DURATION_SECONDS, PHASES, fillMissingPlanCues, fitPhaseTiming, insertMovement, mergeLibraryCatalog, movementAddition, movementSourceId, nextPlanningPhase,
   orderMovementsByPosition, phaseRemaining, phaseTarget, phaseTotal,
-  planLevel, positionGroup, sequenceForTeaching, sequenceWarnings,
+  planLevel, positionGroup, sequenceForTeaching,
   suggestMovements, syncMovementImage, updatePlanSequence, classReadiness, selectionDuration, sideLabel, workingSide,
   type ClassPlan, type LibraryMovement, type Phase, type PlanBrief,
   type PlanMovement, type SequenceMode, type SideSelection, type WorkingSide, type ReadinessReport,
@@ -96,6 +97,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock3,
+  Ellipsis,
   Heart,
   House,
   ImagePlus,
@@ -263,6 +265,8 @@ const USER_STORAGE_PREFIX = "@blush-bodies/user-data-v2/";
 const WORKSPACE_RECOVERY_PREFIX = "@blush-bodies/workspace-recovery-v1/";
 const userStorageKey = (account: Pick<Account, "role" | "email">) =>
   `${USER_STORAGE_PREFIX}${account.role}/${account.email.toLowerCase()}`;
+const walkthroughStorageKey = (account: Pick<Account, "role" | "email">) =>
+  `@blush-bodies/walkthrough-v1/${account.role}/${account.email.toLowerCase()}`;
 const CREDENTIALS_KEY = "blush-bodies-local-credentials-v1";
 const PASSWORD_MIN_LENGTH = 12;
 const PASSWORD_MAX_LENGTH = 128;
@@ -745,17 +749,21 @@ function Main({
   label,
   onPress,
   Icon,
+  disabled = false,
 }: {
   label: string;
   onPress: () => void;
   Icon?: typeof Plus;
+  disabled?: boolean;
 }) {
   return (
     <Pressable
       onPress={onPress}
-      style={s.main}
+      disabled={disabled}
+      style={[s.main, disabled && s.disabled]}
       accessibilityRole="button"
       accessibilityLabel={label}
+      accessibilityState={{ disabled }}
     >
       {Icon ? <Icon size={17} color={C.white} /> : null}
       <Text style={s.mainText}>{label}</Text>
@@ -808,7 +816,7 @@ function AppDialog({
             <Text accessibilityRole="header" style={s.headerTitle}>
               {title}
             </Text>
-            <Text style={s.confirmationCopy}>{message}</Text>
+            {message ? <Text style={s.confirmationCopy}>{message}</Text> : null}
           </View>
           <View style={s.form}>
             {actions.map((action) =>
@@ -922,10 +930,12 @@ function Header({
   title,
   back,
   right,
+  compact = false,
 }: {
   title: string;
   back?: () => void;
   right?: React.ReactNode;
+  compact?: boolean;
 }) {
   return (
     <View style={s.header}>
@@ -938,8 +948,8 @@ function Header({
           <ArrowLeft size={21} color={C.muted} />
         </Pressable>
       ) : null}
-      <Text style={s.headerTitle}>{title}</Text>
-      <View style={s.headerRight}>{right}</View>
+      <Text style={[s.headerTitle, compact && s.compactHeaderTitle]}>{title}</Text>
+      {right ? <View style={s.headerRight}>{right}</View> : null}
     </View>
   );
 }
@@ -947,7 +957,11 @@ function TopSafeArea() {
   const insets = useSafeAreaInsets();
   return <View style={{ height: insets.top }} />;
 }
-function Nav({ tab, setTab }: { tab: Tab; setTab: (tab: Tab) => void }) {
+function Nav({ tab, setTab, highlightedTab }: {
+  tab: Tab;
+  setTab: (tab: Tab) => void;
+  highlightedTab?: Tab;
+}) {
   const items: [Tab, string, typeof House][] = [
     ["home", "Home", House],
     ["classes", "Classes", CalendarDays],
@@ -961,10 +975,10 @@ function Nav({ tab, setTab }: { tab: Tab; setTab: (tab: Tab) => void }) {
         <Pressable
           key={id}
           onPress={() => setTab(id)}
-          style={s.navItem}
+          style={[s.navItem, highlightedTab === id && s.walkthroughTab]}
           accessibilityRole="tab"
           accessibilityLabel={label}
-          accessibilityState={{ selected: id === tab }}
+          aria-selected={id === tab}
         >
           <Icon size={22} color={id === tab ? C.rose : C.muted} />
           <Text style={[s.navLabel, id === tab && s.navLabelOn]}>{label}</Text>
@@ -999,6 +1013,63 @@ function Welcome({
         <Main label="Get Started" onPress={getStarted} />
         <Outline label="Log In" onPress={logIn} />
       </View>
+    </View>
+  );
+}
+const walkthroughSteps = [
+  {
+    tab: "home",
+    title: "Plan from Home",
+    copy: "Plan Class opens the builder. Choose a template or build your own sequence.",
+    nextLabel: "Classes",
+  },
+  {
+    tab: "classes",
+    title: "Find your class plans",
+    copy: "Continue a draft here, or open a saved plan to review it and start teaching.",
+    nextLabel: "Insights",
+  },
+  {
+    tab: "insights",
+    title: "Review past classes",
+    copy: "After you teach, open a session here to see its summary and teaching notes.",
+    nextLabel: null,
+  },
+] as const;
+
+function WalkthroughTip({ index, close }: { index: number; close: () => void }) {
+  const step = walkthroughSteps[index];
+  return (
+    <View style={s.walkthroughTip}>
+      <View style={s.row}>
+        <Text accessibilityRole="header" accessibilityLiveRegion="polite" style={s.moveTitle}>{step.title}</Text>
+        <Text style={s.sub}>{index + 1} of {walkthroughSteps.length}</Text>
+      </View>
+      <Text style={s.sub}>{step.copy}</Text>
+      <View style={s.walkthroughTipFooter}>
+        {step.nextLabel ? <Text style={s.walkthroughHint}>Tap {step.nextLabel} below to continue.</Text> : null}
+        <Pressable onPress={close} style={s.walkthroughAction}
+          accessibilityRole="button" accessibilityLabel={step.nextLabel ? "Skip walkthrough" : "Done"}>
+          <Text style={s.outlineText}>{step.nextLabel ? "Skip" : "Done"}</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function WalkthroughInvite({ start, dismiss }: { start: () => void; dismiss: () => void }) {
+  return (
+    <View style={s.walkthroughInvite}>
+      <Pressable onPress={start} style={s.walkthroughInviteMain}
+        accessibilityRole="button" accessibilityLabel="Take the app tour">
+        <View style={s.avatar}><Info size={20} color={C.rose} /></View>
+        <Text style={[s.moveTitle, s.flex]}>Take the app tour</Text>
+        <ChevronRight size={18} color={C.rose} />
+      </Pressable>
+      <Pressable onPress={dismiss} style={s.walkthroughAction}
+        accessibilityRole="button" accessibilityLabel="Dismiss tour invitation">
+        <X size={18} color={C.muted} />
+      </Pressable>
     </View>
   );
 }
@@ -1689,6 +1760,8 @@ function InstructorHome({
   setSelectedDate,
   activeSession,
   create,
+  walkthroughInvite,
+  highlightPlan,
   assign,
   start,
   resume,
@@ -1703,6 +1776,8 @@ function InstructorHome({
   setSelectedDate: (date: string) => void;
   activeSession?: ActiveTeachingSession;
   create: () => void;
+  walkthroughInvite?: React.ReactNode;
+  highlightPlan?: boolean;
   assign: (slot: ScheduledClass) => void;
   start: (slot: ScheduledClass) => void;
   resume: () => void;
@@ -1760,6 +1835,7 @@ function InstructorHome({
           <UserRound size={20} color={C.rose} />
         </View>
       </View>
+      {walkthroughInvite}
       {activeSession ? (
         <Pressable
           onPress={resume}
@@ -1805,7 +1881,7 @@ function InstructorHome({
         <Text style={s.section}>{classDateLabel(selectedDate)} Classes</Text>
         <Pressable
           onPress={create}
-          style={s.plan}
+          style={[s.plan, highlightPlan && s.walkthroughPlan]}
           accessibilityRole="button"
           accessibilityLabel="Plan a class"
         >
@@ -2524,7 +2600,7 @@ function ChoiceSelect({
           <ChevronDown size={19} color={C.muted} />
         </Pressable>
       </View>
-      <Modal transparent visible={open} animationType="fade">
+      <Modal transparent visible={open} animationType="fade" onRequestClose={() => setOpen(false)}>
         <Pressable
           onPress={() => setOpen(false)}
           style={s.choiceBackdrop}
@@ -2558,7 +2634,7 @@ function ChoiceSelect({
                     }}
                     style={[s.choiceRow, selected && s.choiceRowSelected]}
                     accessibilityRole="radio"
-                    accessibilityState={{ checked: selected }}
+                    aria-checked={selected}
                     accessibilityLabel={option}
                   >
                     <Text style={s.settingText}>{option}</Text>
@@ -2573,6 +2649,38 @@ function ChoiceSelect({
     </>
   );
 }
+function PlanDisclosure({
+  title,
+  detail,
+  expanded,
+  toggle,
+  children,
+}: {
+  title: string;
+  detail?: string;
+  expanded: boolean;
+  toggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <View style={s.planDisclosure}>
+      <Pressable
+        onPress={toggle}
+        style={s.planDisclosureButton}
+        accessibilityRole="button"
+        accessibilityLabel={detail ? `${title}, ${detail}` : title}
+        aria-expanded={expanded}
+      >
+        <View style={s.flex}>
+          <Text style={s.moveTitle}>{title}</Text>
+          {detail ? <Text style={s.sub}>{detail}</Text> : null}
+        </View>
+        {expanded ? <ChevronDown size={18} color={C.rose} /> : <ChevronRight size={18} color={C.rose} />}
+      </Pressable>
+      {expanded ? <View style={s.planDisclosureBody}>{children}</View> : null}
+    </View>
+  );
+}
 function Create({
   back,
   generate,
@@ -2583,202 +2691,84 @@ function Create({
   initialClass?: ScheduledClass;
 }) {
   const { showAlert } = useAppDialog();
-  const programs = [
-    "Beginner Foundations",
-    "Intermediate Flow",
-    "Strong Pilates",
-  ];
+  const programs = {
+    Beginner: "Beginner Foundations",
+    Intermediate: "Intermediate Flow",
+    Advanced: "Strong Pilates",
+  };
+  const levels = ["Beginner", "Intermediate", "Advanced"] as const;
   const weeks = ["Week 1", "Week 2", "Week 3", "Week 4"];
   const days = ["Day 1", "Day 2", "Day 3", "Day 4", "Day 5"];
   const initialWeek = initialClass?.lesson.match(/Week\s+\d+/i)?.[0];
   const initialDay = initialClass?.lesson.match(/Day\s+\d+/i)?.[0];
-  const [program, setProgram] = useState(
-    initialClass?.level === "Intermediate"
-      ? programs[1]
-      : initialClass?.level === "Advanced"
-        ? programs[2]
-        : programs[0],
+  const [level, setLevel] = useState<(typeof levels)[number]>(
+    levels.find((option) => option === initialClass?.level) ?? "Beginner",
   );
   const [week, setWeek] = useState(
-    weeks.find((option) => option.toLowerCase() === initialWeek?.toLowerCase()) ??
-      weeks[0],
+    weeks.find((option) => option.toLowerCase() === initialWeek?.toLowerCase()) ?? weeks[0],
   );
   const [day, setDay] = useState(
-    days.find((option) => option.toLowerCase() === initialDay?.toLowerCase()) ??
-      days[0],
-  );
-  const [scheduledDate, setScheduledDate] = useState(
-    initialClass?.date ?? dateKeyFromOffset(1),
-  );
-  const [scheduledTime, setScheduledTime] = useState(
-    initialClass?.time ?? "09:00",
-  );
-  const [now, setNow] = useState(() => new Date());
-  const timeOptions = useMemo(
-    () => scheduleTimeOptions(scheduledDate, now),
-    [scheduledDate, now],
+    days.find((option) => option.toLowerCase() === initialDay?.toLowerCase()) ?? days[0],
   );
   const [energy, setEnergy] = useState("Flowing");
   const [fromScratch, setFromScratch] = useState(false);
   const [equipment, setEquipment] = useState<string[]>(["Mat"]);
-  const toggleEquipment = (item: string) =>
-    setEquipment((current) =>
-      current.includes(item)
-        ? current.filter((x) => x !== item)
-        : [...current, item],
-    );
-  useEffect(() => {
-    if (scheduledDate !== localDateKey()) return;
-    setNow(new Date());
-    const timer = setInterval(() => setNow(new Date()), 30_000);
-    return () => clearInterval(timer);
-  }, [scheduledDate]);
-  useEffect(() => {
-    if (timeOptions.includes(scheduledTime)) return;
-    setScheduledTime(timeOptions[0] ?? "");
-  }, [scheduledTime, timeOptions]);
+  const [showDetails, setShowDetails] = useState(false);
+
   const submit = () => {
-    const cleanTime = scheduledTime.trim();
-    if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(cleanTime)) {
-      showAlert("Check start time", "Use 24-hour time such as 09:30.");
-      return;
-    }
-    const start = dateFromKey(scheduledDate);
-    const [hours, minutes] = cleanTime.split(":").map(Number);
-    start.setHours(hours, minutes, 0, 0);
-    if (start.getTime() <= Date.now()) {
-      showAlert("Choose a future class", "Select a future date and time.");
-      return;
-    }
     if (!equipment.length) {
-      showAlert(
-        "Choose equipment",
-        "Select at least one available item before generating the plan.",
-      );
+      showAlert("Choose equipment", "Select at least one item for this class.");
       return;
     }
     generate({
-      program,
-      level: program === programs[1]
-        ? "Intermediate"
-        : program === programs[2]
-          ? "Advanced"
-          : "Beginner",
+      program: programs[level],
+      level,
       week,
       day,
-      scheduledDate,
-      scheduledTime: cleanTime,
+      scheduledDate: initialClass?.date,
+      scheduledTime: initialClass?.time,
       energy,
       equipment,
     }, fromScratch);
   };
+
   return (
     <View style={s.flex}>
       <ScrollView contentContainerStyle={s.page}>
-        <Header title="Create Class Plan" back={back} />
-        <View style={s.sequenceModes}>
-          {[true, false].map((scratch) => (
-            <Pressable
-              key={String(scratch)}
-              accessibilityRole="radio"
-              accessibilityState={{ checked: fromScratch === scratch }}
-              onPress={() => setFromScratch(scratch)}
-              style={[s.sequenceMode, fromScratch === scratch && s.sequenceModeOn]}
-            >
-              <Text style={[s.optionText, fromScratch === scratch && s.roseText]}>
-                {scratch ? "From scratch" : "Use template"}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-        <Text style={s.sub}>
-          Set the lesson brief. You can edit everything before teaching.
-        </Text>
-        <View style={s.steps}>
-          {["Class", "Focus", "Review"].map((x, i) => (
-            <View key={x} style={s.stepWrap}>
-              <View style={[s.step, i === 0 && s.stepOn]}>
-                <Text style={[s.stepNum, i === 0 && s.stepNumOn]}>{i + 1}</Text>
-              </View>
-              <Text style={[s.stepLabel, i === 0 && s.roseText]}>{x}</Text>
-            </View>
-          ))}
-        </View>
-        <ChoiceSelect
-          label="PROGRAM"
-          value={program}
-          options={programs}
-          onChange={setProgram}
-        />
-        <ChoiceSelect
-          label="WEEK"
-          value={week}
-          options={weeks}
-          onChange={setWeek}
-        />
-        <ChoiceSelect
-          label="LESSON DAY"
-          value={day}
-          options={days}
-          onChange={setDay}
-        />
+        <Header title="Create Class Plan" back={back} compact />
         <View style={s.selectGroup}>
-          <Text style={s.label}>CLASS DATE</Text>
-          <Calendar
-            current={scheduledDate}
-            minDate={localDateKey()}
-            maxDate={dateKeyFromOffset(120)}
-            firstDay={1}
-            enableSwipeMonths
-            markedDates={{
-              [scheduledDate]: {
-                selected: true,
-                selectedColor: C.rose,
-                selectedTextColor: C.white,
-              },
-            }}
-            onDayPress={(selected: DateData) =>
-              setScheduledDate(selected.dateString)
-            }
-            style={s.bookingCalendar}
-            theme={{
-              calendarBackground: C.card,
-              monthTextColor: C.ink,
-              textMonthFontWeight: "800",
-              textSectionTitleColor: C.muted,
-              dayTextColor: C.ink,
-              todayTextColor: C.rose,
-              arrowColor: C.rose,
-              textDisabledColor: C.line,
-            }}
-          />
-        </View>
-        <ChoiceSelect
-          label="START TIME"
-          value={scheduledTime || "No future times today"}
-          options={timeOptions}
-          onChange={setScheduledTime}
-        />
-        <Text style={s.sub}>
-          {classDateLabel(scheduledDate, true)} at {scheduledTime || "--:--"}
-          {scheduledDate === localDateKey()
-            ? ` / Device time ${timeFromMinutes(now.getHours() * 60 + now.getMinutes())}`
-            : ""}
-        </Text>
-        <View style={s.selectGroup}>
-          <Text style={s.label}>CLASS ENERGY</Text>
-          <View style={s.options}>
-            {["Calm", "Energising", "Strong", "Flowing"].map((x) => (
+          <Text style={s.label}>START WITH</Text>
+          <View style={s.sequenceModes}>
+            {[false, true].map((scratch) => (
               <Pressable
-                key={x}
-                onPress={() => setEnergy(x)}
-                style={[s.option, energy === x && s.optionOn]}
+                key={String(scratch)}
                 accessibilityRole="radio"
-                accessibilityState={{ checked: energy === x }}
+                aria-checked={fromScratch === scratch}
+                onPress={() => setFromScratch(scratch)}
+                style={[s.sequenceMode, fromScratch === scratch && s.sequenceModeOn]}
               >
-                <Text style={[s.optionText, energy === x && s.roseText]}>
-                  {x}
+                <Text style={[s.planOptionText, fromScratch === scratch && s.roseText]}>
+                  {scratch ? "From scratch" : "Use template"}
                 </Text>
+              </Pressable>
+            ))}
+          </View>
+          <Text style={s.sub}>
+            {fromScratch ? "Choose each movement yourself." : "Review and edit a ready-made sequence."}
+          </Text>
+        </View>
+        <View style={s.selectGroup}>
+          <Text style={s.label}>CLASS LEVEL</Text>
+          <View style={s.sequenceModes}>
+            {levels.map((option) => (
+              <Pressable
+                key={option}
+                onPress={() => setLevel(option)}
+                style={[s.sequenceMode, level === option && s.sequenceModeOn]}
+                accessibilityRole="radio"
+                aria-checked={level === option}
+              >
+                <Text style={[s.planOptionText, level === option && s.roseText]}>{option}</Text>
               </Pressable>
             ))}
           </View>
@@ -2786,44 +2776,124 @@ function Create({
         <View style={s.selectGroup}>
           <Text style={s.label}>EQUIPMENT</Text>
           <View style={s.options}>
-            {["Mat", "Band", "Ball", "Ring"].map((x) => {
-              const selected = equipment.includes(x);
+            {["Mat", "Band", "Ball", "Ring"].map((item) => {
+              const selected = equipment.includes(item);
               return (
                 <Pressable
-                  key={x}
-                  onPress={() => toggleEquipment(x)}
-                  style={[s.option, selected && s.optionOn]}
+                  key={item}
+                  onPress={() => setEquipment((current) => current.includes(item)
+                    ? current.filter((option) => option !== item) : [...current, item])}
+                  style={[s.option, s.planOption, selected && s.optionOn]}
                   accessibilityRole="checkbox"
-                  accessibilityState={{ checked: selected }}
+                  aria-checked={selected}
                 >
-                  <Text style={[s.optionText, selected && s.roseText]}>
-                    {x}
-                  </Text>
+                  <Text style={[s.planOptionText, selected && s.roseText]}>{item}</Text>
                 </Pressable>
               );
             })}
           </View>
         </View>
-        <View style={s.structure}>
-          <Text style={s.label}>45-MINUTE STRUCTURE</Text>
-          <View style={s.structureCard}>
-            <View style={s.structureBar}>
-              <View style={[s.warm, { flex: 5 }]} />
-              <View style={[s.mainPart, { flex: 35 }]} />
-              <View style={[s.warm, { flex: 5 }]} />
+        <PlanDisclosure
+          title="Lesson details"
+          detail={`${week} · ${day} · ${energy}`}
+          expanded={showDetails}
+          toggle={() => setShowDetails(!showDetails)}
+        >
+          <View style={s.planDetailFields}>
+            <View style={s.flex}>
+              <ChoiceSelect label="WEEK" value={week} options={weeks} onChange={setWeek} />
             </View>
-            <View style={s.row}>
-              <Text style={s.duration}>5 min warm-up</Text>
-              <Text style={s.structureCenter}>35 min main</Text>
-              <Text style={s.duration}>5 min cool-down</Text>
+            <View style={s.flex}>
+              <ChoiceSelect label="LESSON DAY" value={day} options={days} onChange={setDay} />
             </View>
           </View>
-        </View>
+          <View style={s.selectGroup}>
+            <Text style={s.label}>CLASS ENERGY</Text>
+            <View style={s.options}>
+              {["Calm", "Energising", "Strong", "Flowing"].map((option) => (
+                <Pressable
+                  key={option}
+                  onPress={() => setEnergy(option)}
+                  style={[s.option, s.planOption, energy === option && s.optionOn]}
+                  accessibilityRole="radio"
+                  aria-checked={energy === option}
+                >
+                  <Text style={[s.planOptionText, energy === option && s.roseText]}>{option}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        </PlanDisclosure>
       </ScrollView>
       <View style={s.sticky}>
-        <Main label={fromScratch ? "Build Class" : "Generate Class Plan"} onPress={submit} />
+        <Main label={fromScratch ? "Build Sequence" : "Review Sequence"} onPress={submit} />
       </View>
     </View>
+  );
+}
+function PlanDate({
+  brief,
+  change,
+}: {
+  brief: PlanBrief;
+  change: (slot?: { date: string; time: string }) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [date, setDate] = useState(brief.scheduledDate ?? dateKeyFromOffset(1));
+  const [time, setTime] = useState(brief.scheduledTime ?? "09:00");
+  const now = useLiveNow();
+  const options = scheduleTimeOptions(date, now);
+  const startTime = options.includes(time) ? time : options[0] ?? "";
+  const dateLabel = brief.scheduledDate && brief.scheduledTime
+    ? `${classDateLabel(brief.scheduledDate, true)} at ${brief.scheduledTime}` : undefined;
+  const done = (slot?: { date: string; time: string }) => {
+    change(slot);
+    setExpanded(false);
+  };
+
+  return (
+    <PlanDisclosure
+      title="Class date and time"
+      detail={dateLabel ?? "Optional"}
+      expanded={expanded}
+      toggle={() => {
+        if (!expanded) {
+          setDate(brief.scheduledDate && brief.scheduledDate >= localDateKey()
+            ? brief.scheduledDate : dateKeyFromOffset(1));
+          setTime(brief.scheduledTime ?? "09:00");
+        }
+        setExpanded(!expanded);
+      }}
+    >
+      <Calendar
+        current={date}
+        minDate={localDateKey()}
+        maxDate={dateKeyFromOffset(120)}
+        firstDay={1}
+        enableSwipeMonths
+        markedDates={{ [date]: { selected: true, selectedColor: C.rose, selectedTextColor: C.white } }}
+        onDayPress={(selected: DateData) => setDate(selected.dateString)}
+        style={s.bookingCalendar}
+        theme={{
+          calendarBackground: C.card,
+          monthTextColor: C.ink,
+          textMonthFontWeight: "800",
+          textSectionTitleColor: C.muted,
+          dayTextColor: C.ink,
+          todayTextColor: C.rose,
+          arrowColor: C.rose,
+          textDisabledColor: C.line,
+        }}
+      />
+      <ChoiceSelect
+        label="START TIME"
+        value={startTime || "No future times today"}
+        options={options}
+        onChange={setTime}
+      />
+      <Main label="Use Date & Time" onPress={() => done({ date, time: startTime })} disabled={!startTime} />
+      {dateLabel ? <Outline label="Schedule Later" onPress={() => done()} /> : null}
+    </PlanDisclosure>
   );
 }
 function Generated({
@@ -2840,43 +2910,25 @@ function Generated({
   library: LibraryMovement[];
   schedule: ScheduledClass[];
   back: () => void;
-  edit: () => void;
+  edit: (phase?: Phase) => void;
   save: () => void;
   schedulePlan: () => void;
-  teach: () => void;
+  teach: (slotId?: string) => void;
 }) {
-  const { showAlert } = useAppDialog();
   const now = useLiveNow();
   const readiness = classReadiness(plan, library);
   const valid = readiness.ready;
+  const durationMs = planTotal(plan) * 1000;
   const nextClass = schedule
     .filter(
       (slot) =>
         slot.planId === plan.id &&
         slot.status !== "CANCELLED" &&
         slot.status !== "COMPLETED" &&
-        isFutureScheduleSlot(slot, now),
+        scheduleSlotStartsAt(slot).getTime() + durationMs > now.getTime(),
     )
     .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`))[0];
   const nextAvailable = nextAvailableClassSlot(schedule, now);
-  const start = () => {
-    if (!valid) {
-      showAlert(
-        "Plan needs review",
-        "Resolve the class readiness issues before starting this class.",
-      );
-      edit();
-      return;
-    }
-    if (plan.status !== "saved") {
-      showAlert(
-        "Save this plan first",
-        "Review and save the exact sequence before entering Teach Mode.",
-      );
-      return;
-    }
-    teach();
-  };
   return (
     <View style={s.flex}>
       <ScrollView contentContainerStyle={s.page}>
@@ -2916,11 +2968,7 @@ function Generated({
             <Text style={s.planMeasureLabel}>MOVEMENT CARDS</Text>
           </View>
           <View style={s.planMeasure}>
-            <Text style={s.planMeasureValue}>01:15</Text>
-            <Text style={s.planMeasureLabel}>EACH MOVEMENT</Text>
-          </View>
-          <View style={s.planMeasure}>
-            <Text style={s.planMeasureValue}>45:00</Text>
+            <Text style={s.planMeasureValue}>{fmt(planTotal(plan))}</Text>
             <Text style={s.planMeasureLabel}>TOTAL CLASS</Text>
           </View>
         </View>
@@ -2943,13 +2991,14 @@ function Generated({
             (movement) => movement.phase === phase,
           );
           return (
-            <Pressable key={phase} onPress={edit} style={s.planBlock}>
+            <Pressable key={phase} onPress={() => edit(phase)} style={s.planBlock}
+              accessibilityRole="button" accessibilityLabel={`Review ${phase.toLowerCase()} sequence`}>
               <View style={s.planAccent} />
               <View style={s.flex}>
                 <Text style={s.blockTitle}>
                   {phase === "Main" ? "Main sequence" : phase}
                 </Text>
-                <Text style={s.sub}>{phaseMoves.length} movements</Text>
+                <Text style={s.sub}>{phaseMoves.length} movement cards</Text>
               </View>
               <Text style={s.planTime}>{fmt(phaseTotal(plan, phase))}</Text>
               <ChevronRight size={19} color={C.muted} />
@@ -2958,28 +3007,36 @@ function Generated({
         })}
         <ReadinessChecks report={readiness} />
       </ScrollView>
-      <View style={s.dual}>
-        <View style={s.flex}>
-          <Outline label="Edit Sequence" onPress={edit} />
+      {!valid && plan.status !== "saved" ? (
+        <View style={s.sticky}>
+          <Main label="Fix Sequence" onPress={() => edit()} />
         </View>
-        <View style={s.flex}>
-          <Main
-            label={
-              plan.status === "saved"
-                ? nextClass
-                  ? "Schedule Another"
-                  : "Schedule Class"
-                : plan.brief.scheduledDate
-                  ? "Save & Schedule"
-                  : "Save Plan"
-            }
-            onPress={plan.status === "saved" ? schedulePlan : save}
-          />
+      ) : (
+        <View style={s.dual}>
+          <View style={s.flex}>
+            <Outline label="Edit Sequence" onPress={() => edit()} />
+          </View>
+          <View style={s.flex}>
+            <Main
+              label={
+                plan.status === "saved"
+                  ? nextClass
+                    ? "Schedule Another"
+                    : "Schedule Class"
+                  : plan.brief.scheduledDate
+                    ? "Save & Schedule"
+                    : "Save Plan"
+              }
+              onPress={plan.status === "saved" ? schedulePlan : save}
+            />
+          </View>
         </View>
-      </View>
-      <View style={s.stickySmall}>
-        <Main label="Start Class" onPress={start} />
-      </View>
+      )}
+      {plan.status === "saved" && valid ? (
+        <View style={s.stickySmall}>
+          <Main label="Start Class" onPress={() => teach(nextClass?.id)} />
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -2988,6 +3045,8 @@ function Classes({
   change,
   open,
   back,
+  save,
+  setClassDate,
   library,
   add,
   reviewMovement,
@@ -3001,6 +3060,8 @@ function Classes({
   change: (movements: PlanMovement[], mode?: SequenceMode) => void;
   open: (phase: Phase) => void;
   back: () => void;
+  save: () => void;
+  setClassDate: (slot?: { date: string; time: string }) => void;
   library: LibraryMovement[];
   add: (movement: LibraryMovement, phase: Phase) => void;
   reviewMovement: (movement: LibraryMovement, phase: Phase) => void;
@@ -3013,14 +3074,20 @@ function Classes({
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [draftMovement, setDraftMovement] = useState<PlanMovement | null>(null);
   const [editorError, setEditorError] = useState("");
+  const [showChecks, setShowChecks] = useState(false);
+  const [showOrder, setShowOrder] = useState(false);
+  const compact = useWindowDimensions().width <= 360;
+  const sequenceScroll = useRef<React.ComponentRef<typeof ScrollView>>(null);
   const visible = plan.movements
     .map((movement, index) => ({ movement, index }))
     .filter((item) => filter === "All" || item.movement.phase === filter);
   const { showAlert } = useAppDialog();
-  const valid = classReadiness(plan, library).ready;
+  const readiness = classReadiness(plan, library);
+  const valid = readiness.ready;
   const mode = plan.sequenceMode ?? "auto";
   const phase = filter === "All" ? nextPlanningPhase(plan) : filter;
   const suggestions = suggestMovements(plan, library, phase);
+  const fittedPhase = fitPhaseTiming(plan.movements, phase);
   const editingSource = draftMovement
     ? library.find((item) => item.id === movementSourceId(draftMovement))
     : undefined;
@@ -3051,6 +3118,21 @@ function Classes({
   };
   const remove = (index: number) =>
     applyChange(plan.movements.filter((_, i) => i !== index));
+  const canMoveEarlier = (index: number) =>
+    index > 0 && plan.movements[index - 1].phase === plan.movements[index].phase;
+  const canMoveLater = (index: number) =>
+    index < plan.movements.length - 1 && plan.movements[index + 1].phase === plan.movements[index].phase;
+  const openMovementActions = (index: number) => {
+    const actions: DialogAction[] = [];
+    if (canMoveEarlier(index)) actions.push({ text: "Move Earlier", onPress: () => move(index, -1) });
+    if (canMoveLater(index)) actions.push({ text: "Move Later", onPress: () => move(index, 1) });
+    actions.push(
+      { text: "Replace Movement", onPress: () => replace(index) },
+      { text: "Remove Movement", onPress: () => remove(index), style: "destructive" },
+      { text: "Cancel", style: "cancel" },
+    );
+    showAlert(movementLabel(plan.movements[index]), "", actions, List);
+  };
   const beginEdit = (index: number) => {
     const movement = plan.movements[index];
     setEditingIndex(index);
@@ -3074,7 +3156,7 @@ function Classes({
     applyChange(
       plan.movements.map((movement, index) =>
         index === editingIndex
-          ? { ...draftMovement, title, position, cue, duration: MOVEMENT_DURATION_SECONDS }
+          ? { ...draftMovement, title, position, cue }
           : movement,
       ),
     );
@@ -3085,155 +3167,178 @@ function Classes({
     if (difference === 0) return "On target";
     return `${fmt(Math.abs(difference))} ${difference > 0 ? "over" : "short"}`;
   };
+  const selectPhase = (next: "All" | Phase) => {
+    setFilter(next);
+    sequenceScroll.current?.scrollTo({ y: 0, animated: false });
+  };
   return (
-    <>
-      <ScrollView contentContainerStyle={s.page}>
-      <View style={s.editorHeader}>
-        <View style={s.flex}>
-          <Header title="Class Sequence" back={back} />
-        </View>
-        <Pressable
-          onPress={undo}
-          disabled={!canUndo}
-          style={[s.editorUndo, !canUndo && s.disabled]}
-          accessibilityLabel="Undo last sequence change"
-          accessibilityRole="button"
-        >
-          <Undo2 size={18} color={C.rose} />
-        </Pressable>
-      </View>
-      <Main label="Review Class" onPress={back} />
-      <ReadinessChecks report={classReadiness(plan, library)} />
-      <View style={s.sequenceModes}>
-        {(["auto", "manual"] as SequenceMode[]).map((option) => (
-          <Pressable
-            key={option}
-            accessibilityRole="radio"
-            aria-checked={mode === option}
-            onPress={() => { if (mode !== option) applyChange(plan.movements, option); }}
-            style={[s.sequenceMode, mode === option && s.sequenceModeOn]}
-          >
-            <Text style={[s.optionText, mode === option && s.roseText]}>
-              {option === "auto" ? "Auto order" : "Manual order"}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
-      {notice ? <Text accessibilityLiveRegion="polite" style={s.sequenceNotice}>{notice}</Text> : null}
-      {sequenceWarnings(plan.movements).map((warning) => (
-        <Text key={warning} style={s.planningWarning}>{warning}</Text>
-      ))}
-      <Text
-        style={[s.sub, { color: valid ? C.sage : C.gold, fontWeight: "800" }]}
-      >
-        {fmt(planTotal(plan))} total · {plan.movements.length} movements ·{" "}
-        {valid ? "Valid" : "Timing needs review"}
-      </Text>
-      <View style={s.phaseTimingStrip}>
-        {(["Warm-up", "Main", "Cool-down"] as Phase[]).map((phase) => (
-          <Pressable key={phase} onPress={() => setFilter(phase)} style={s.phaseTimingItem}
-            accessibilityRole="button" accessibilityLabel={`${phase}, ${phaseStatus(phase)}`}>
-            <Text style={s.phaseTimingLabel}>
-              {phase === "Main" ? "MAIN" : phase.toUpperCase()}
-            </Text>
-            <Text style={s.phaseTimingValue}>{fmt(phaseTotal(plan, phase))}</Text>
-            <Text
-              style={[
-                s.phaseTimingStatus,
-                phaseTotal(plan, phase) === phaseTarget(phase) && s.greenText,
-              ]}
-            >
-              {phaseStatus(phase)}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
-      <Pressable onPress={() => open(phase)} style={s.addMovementButton} accessibilityRole="button">
-        <Plus size={17} color={C.rose} />
-        <Text style={s.addMovementText}>Add to {phase.toLowerCase()}</Text>
-      </Pressable>
-      <View style={s.options}>
-        {(["All", "Warm-up", "Main", "Cool-down"] as const).map((x) => (
-          <Pressable key={x} onPress={() => setFilter(x)}>
-            <Pill label={x} active={filter === x} />
-          </Pressable>
-        ))}
-      </View>
-      <View style={s.suggestions}>
-        <Text style={s.label}>SUGGESTED FOR {phase.toUpperCase()}</Text>
-        {suggestions.map(({ movement, reason }) => (
-          <View key={movement.id} style={s.suggestionRow}>
-            <MovementVisual movement={movement} style={s.suggestionImage} label={movement.name} />
-            <View style={s.flex}>
-              <Text style={s.moveTitle}>{movement.name}</Text>
-              <Text style={s.sub}>{fmt(selectionDuration(movement))} / {movement.position}</Text>
-              {movement.sideMode === "paired" ? <Text style={s.suggestionReason}>Both sides / {fmt(movement.duration)} each</Text> : null}
-              <Text style={s.suggestionReason}>{reason}</Text>
-            </View>
+    <View style={s.flex}>
+      <View style={s.sequenceHeader}>
+        <Header title="Class Sequence" back={back} compact
+          right={
             <Pressable
-              onPress={() => movement.reviewStatus === "needs-review"
-                ? reviewMovement(movement, phase) : add(movement, phase)}
-              style={s.suggestionAdd} accessibilityRole="button"
-              accessibilityLabel={movement.reviewStatus === "needs-review"
-                ? `Review ${movement.name}` : `Add ${movement.name} to ${phase}`}>
-              {movement.reviewStatus === "needs-review"
-                ? <Pencil size={19} color={C.rose} /> : <Plus size={20} color={C.rose} />}
+              onPress={undo}
+              disabled={!canUndo}
+              style={[s.editorUndo, !canUndo && s.disabled]}
+              accessibilityLabel="Undo last sequence change"
+              accessibilityRole="button"
+            >
+              <Undo2 size={18} color={C.rose} />
             </Pressable>
+          }
+        />
+        <Text style={s.sub}>{plan.brief.program} · {fmt(planTotal(plan))} total</Text>
+        <View style={s.phaseTimingStrip} accessibilityRole="tablist">
+          {(["All", ...PHASES] as const).map((option) => {
+            const selected = filter === option;
+            const time = option === "All" ? planTotal(plan) : phaseTotal(plan, option);
+            return (
+              <Pressable key={option} onPress={() => selectPhase(option)}
+                style={[s.phaseTimingItem, selected && s.phaseTimingItemOn]}
+                accessibilityRole="tab" aria-selected={selected}
+                accessibilityLabel={option === "All" ? "All phases" : option}>
+                <Text style={[s.phaseTimingLabel, selected && s.roseText]}>{option}</Text>
+                <Text style={[s.phaseTimingValue, selected && s.roseText]}>{fmt(time)}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </View>
+      <ScrollView ref={sequenceScroll} style={s.flex} contentContainerStyle={s.sequencePage}>
+        <View style={s.row}>
+          <Text style={s.blockTitle}>{filter === "All" ? "All movements" : phase}</Text>
+          {filter !== "All" ? (
+            <Text style={[s.sub, phaseRemaining(plan, phase) === 0 && s.greenText]}>{phaseStatus(phase)}</Text>
+          ) : null}
+        </View>
+        {notice ? <Text accessibilityLiveRegion="polite" style={s.sequenceNotice}>{notice}</Text> : null}
+        <View style={s.planDetailFields}>
+          <Pressable onPress={() => open(phase)}
+            style={[s.addMovementButton, s.flex]} accessibilityRole="button">
+            <Plus size={17} color={C.rose} />
+            <Text style={s.addMovementText}>Add to {phase.toLowerCase()}</Text>
+          </Pressable>
+          {fittedPhase !== plan.movements ? (
+            <Pressable onPress={() => applyChange(fittedPhase)}
+              style={s.addMovementButton} accessibilityRole="button"
+              accessibilityLabel={`Fit ${phase.toLowerCase()} to ${fmt(phaseTarget(phase))}`}>
+              <Text style={s.addMovementText}>Fit to {fmt(phaseTarget(phase))}</Text>
+            </Pressable>
+          ) : null}
+        </View>
+        {plan.status === "draft" ? <PlanDate brief={plan.brief} change={setClassDate} /> : null}
+        {!visible.length ? <Text style={s.empty}>No movements in {filter === "All" ? "this class" : phase.toLowerCase()} yet.</Text> : null}
+        {visible.map(({ movement, index }) => (
+          <View key={`${movement.id}-${index}`} style={s.move}>
+            <Pressable onPress={() => beginEdit(index)} style={s.editorMain}
+              accessibilityRole="button" accessibilityLabel={`Edit ${movementLabel(movement)}`}>
+              <View style={s.sequenceThumbnail}>
+                <MovementVisual
+                  movement={movement}
+                  style={s.sequenceThumbnailImage}
+                  label={`${movementLabel(movement)} sequence preview`}
+                  resizeMode="cover"
+                />
+              </View>
+              <View style={s.flex}>
+                <Text style={s.moveTitle}>{movement.title}</Text>
+                {sideLabel(movement) ? <Text style={s.suggestionReason}>{sideLabel(movement)}</Text> : null}
+                <Text style={s.sub}>
+                  {movement.position} · {fmt(movement.duration)}
+                </Text>
+              </View>
+            </Pressable>
+            {compact ? (
+              <Pressable onPress={() => openMovementActions(index)} style={s.editorUndo}
+                accessibilityRole="button" accessibilityLabel={`Actions for ${movementLabel(movement)}`}>
+                <Ellipsis size={20} color={C.rose} />
+              </Pressable>
+            ) : (
+            <View style={s.editorTools}>
+              <Pressable onPress={() => move(index, -1)} hitSlop={7}
+                disabled={!canMoveEarlier(index)}
+                accessibilityRole="button" accessibilityLabel={`Move ${movementLabel(movement)} earlier`}>
+                <ArrowUp size={17} color={C.muted} />
+              </Pressable>
+              <Pressable onPress={() => move(index, 1)} hitSlop={7}
+                disabled={!canMoveLater(index)}
+                accessibilityRole="button" accessibilityLabel={`Move ${movementLabel(movement)} later`}>
+                <ArrowDown size={17} color={C.muted} />
+              </Pressable>
+              <Pressable onPress={() => replace(index)} hitSlop={7}
+                accessibilityRole="button" accessibilityLabel={`Replace ${movementLabel(movement)}`}>
+                <RefreshCw size={17} color={C.rose} />
+              </Pressable>
+              <Pressable onPress={() => remove(index)} hitSlop={7}
+                accessibilityRole="button" accessibilityLabel={`Remove ${movementLabel(movement)}`}>
+                <Trash2 size={17} color={C.rose} />
+              </Pressable>
+            </View>
+            )}
           </View>
         ))}
-        {!suggestions.length ? (
-          <Text style={s.sub}>{phaseRemaining(plan, phase) === 0 ? "Phase timing complete." :
-            phaseRemaining(plan, phase) < 0 ? "Phase is over time. Review movement durations." :
-              "No matching suggestions for the remaining time."}</Text>
-        ) : null}
-      </View>
-      <Text style={s.group}>
-        {filter.toUpperCase()} · {visible.length} MOVEMENTS
-      </Text>
-      {visible.map(({ movement, index }) => (
-        <View key={`${movement.id}-${index}`} style={s.move}>
-          <Pressable onPress={() => beginEdit(index)} style={s.editorMain}
-            accessibilityRole="button" accessibilityLabel={`Edit ${movementLabel(movement)}`}>
-            <View style={s.sequenceThumbnail}>
-              <MovementVisual
-                movement={movement}
-                style={s.sequenceThumbnailImage}
-                label={`${movementLabel(movement)} sequence preview`}
-                resizeMode="cover"
-              />
+        {suggestions.length > 0 ? (
+        <View style={s.suggestions}>
+          <Text style={s.label}>SUGGESTED FOR {phase.toUpperCase()}</Text>
+          {suggestions.map(({ movement, reason }) => (
+            <View key={movement.id} style={s.suggestionRow}>
+              <MovementVisual movement={movement} style={s.suggestionImage} label={movement.name} />
+              <View style={s.flex}>
+                <Text style={s.moveTitle}>{movement.name}</Text>
+                <Text style={s.sub}>{fmt(selectionDuration(movement))} / {movement.position}</Text>
+                {movement.sideMode === "paired" ? <Text style={s.suggestionReason}>Both sides / {fmt(movement.duration)} each</Text> : null}
+                <Text style={s.suggestionReason}>{reason}</Text>
+              </View>
+              <Pressable
+                onPress={() => movement.reviewStatus === "needs-review"
+                  ? reviewMovement(movement, phase) : add(movement, phase)}
+                style={s.suggestionAdd} accessibilityRole="button"
+                accessibilityLabel={movement.reviewStatus === "needs-review"
+                  ? `Review ${movement.name}` : `Add ${movement.name} to ${phase}`}>
+                {movement.reviewStatus === "needs-review"
+                  ? <Pencil size={19} color={C.rose} /> : <Plus size={20} color={C.rose} />}
+              </Pressable>
             </View>
-            <View style={s.flex}>
-              <Text style={s.moveTitle}>{movement.title}</Text>
-              {sideLabel(movement) ? <Text style={s.suggestionReason}>{sideLabel(movement)}</Text> : null}
-              <Text style={s.sub}>
-                {movement.position} · {fmt(movement.duration)}
-              </Text>
-            </View>
-          </Pressable>
-          <View style={s.editorTools}>
-            <Pressable onPress={() => move(index, -1)} hitSlop={7}
-              disabled={index === 0 || plan.movements[index - 1].phase !== movement.phase}
-              accessibilityRole="button" accessibilityLabel={`Move ${movementLabel(movement)} earlier`}>
-              <ArrowUp size={17} color={C.muted} />
-            </Pressable>
-            <Pressable onPress={() => move(index, 1)} hitSlop={7}
-              disabled={index === plan.movements.length - 1 || plan.movements[index + 1].phase !== movement.phase}
-              accessibilityRole="button" accessibilityLabel={`Move ${movementLabel(movement)} later`}>
-              <ArrowDown size={17} color={C.muted} />
-            </Pressable>
-            <Pressable onPress={() => replace(index)} hitSlop={7}
-              accessibilityRole="button" accessibilityLabel={`Replace ${movementLabel(movement)}`}>
-              <RefreshCw size={17} color={C.rose} />
-            </Pressable>
-            <Pressable onPress={() => remove(index)} hitSlop={7}
-              accessibilityRole="button" accessibilityLabel={`Remove ${movementLabel(movement)}`}>
-              <Trash2 size={17} color={C.rose} />
-            </Pressable>
-          </View>
+          ))}
         </View>
-      ))}
-      {!visible.length ? <Text style={s.empty}>No movements in {filter === "All" ? "this class" : phase.toLowerCase()} yet.</Text> : null}
+        ) : null}
+        <PlanDisclosure title="Sequence order"
+          detail={mode === "auto" ? "Auto order" : "Manual order"}
+          expanded={showOrder} toggle={() => setShowOrder(!showOrder)}>
+          <View style={s.sequenceModes}>
+            {(["auto", "manual"] as const).map((option) => (
+              <Pressable key={option} accessibilityRole="radio" accessibilityState={{ checked: mode === option }}
+                onPress={() => { if (mode !== option) applyChange(plan.movements, option); }}
+                style={[s.sequenceMode, mode === option && s.sequenceModeOn]}>
+                <Text style={[s.optionText, mode === option && s.roseText]}>
+                  {option === "auto" ? "Auto order" : "Manual order"}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </PlanDisclosure>
       </ScrollView>
+      <View style={s.sequenceFooter}>
+        <PlanDisclosure
+          title="Class checks"
+          detail={valid ? readiness.warnings.length ? "Ready with warnings" : "Ready to save" :
+            `${readiness.errors.length} to fix`}
+          expanded={showChecks}
+          toggle={() => setShowChecks(!showChecks)}
+        >
+          <ScrollView style={s.sequenceChecks} nestedScrollEnabled>
+            {readiness.errors.map((message) => <Text key={message} style={s.readinessError}>{message}</Text>)}
+            {readiness.warnings.map((message) => <Text key={message} style={s.planningWarning}>{message}</Text>)}
+            {!readiness.errors.length && !readiness.warnings.length ? (
+              <Text style={s.sequenceNotice}>Timing and side checks passed.</Text>
+            ) : null}
+          </ScrollView>
+        </PlanDisclosure>
+        {plan.status === "draft" ? (
+          <Main label={plan.brief.scheduledDate ? "Save & Schedule" : "Save Plan"}
+            disabled={!valid} onPress={save} />
+        ) : <Main label="Done" onPress={back} />}
+      </View>
       <Modal
         visible={draftMovement !== null}
         transparent
@@ -3327,8 +3432,7 @@ function Classes({
                   <View style={s.durationField}>
                     <Text style={s.label}>DURATION</Text>
                     <View style={s.fixedDurationField}>
-                      <Text style={s.fixedDurationValue}>01:15</Text>
-                      <Text style={s.fixedDurationNote}>Fixed</Text>
+                      <Text style={s.fixedDurationValue}>{fmt(draftMovement.duration)}</Text>
                     </View>
                   </View>
                 </View>
@@ -3351,7 +3455,7 @@ function Classes({
           </View>
         </View>
       </Modal>
-    </>
+    </View>
   );
 }
 function Plans({
@@ -3715,7 +3819,7 @@ function ManualReference({ movement }: { movement: LibraryMovement }) {
       ) : null}
       {!movement.imageUri && !manualMovementArtwork[movement.id] ? <Text style={s.sub}>No photo supplied in the manual.</Text> : null}
       {manual.notes.map((note, index) => <Text key={index} style={s.sequenceNotice}>{note}</Text>)}
-      <Text style={s.sub}>1:15 is the app's planning block, not a duration prescribed by the manual.</Text>
+      <Text style={s.sub}>New cards start at 1:15. The class plan can adjust their timing.</Text>
       <Pressable onPress={() => setExpanded(!expanded)} accessibilityRole="button"
         accessibilityState={{ expanded }} style={s.cue}>
         <Text style={s.cueText}>{expanded ? "Hide source details" : "Show source details"}</Text>
@@ -3760,9 +3864,11 @@ function Details({
 }) {
   const { confirmAction } = useAppDialog();
   const [phase, setPhase] = useState<Phase>(initialPhase ?? movement.phases?.[0] ?? "Main");
-  const [side, setSide] = useState<SideSelection>("both");
+  const [selectedSide, setSide] = useState<SideSelection>("both");
   const remaining = phaseRemaining(plan, phase);
-  const duration = selectionDuration(movement, side);
+  const addition = movementAddition(plan, movement, phase);
+  const side = addition && addition.side !== "both" ? addition.side : selectedSide;
+  const duration = addition?.side === "both" ? selectionDuration(movement, side) : addition?.seconds ?? 0;
   const confirmDeleteMovement = () =>
     confirmAction({
       title: "Delete movement?",
@@ -3827,14 +3933,16 @@ function Details({
                 <Clock3 size={17} color={C.rose} />
               </View>
               <View style={s.flex}>
-                <Text style={s.detailFactLabel}>PLANNED TIME</Text>
+                <Text style={s.detailFactLabel}>DEFAULT TIME</Text>
                 <Text style={s.detailTime}>
                   {fmt(movement.duration)} {movement.sideMode === "paired" ? "per side" : "per movement"}
                 </Text>
               </View>
             </View>
             <View style={s.primaryCueCard}>
-              <Text style={s.primaryCueLabel}>PRIMARY TEACHING CUE</Text>
+              <Text style={s.primaryCueLabel}>
+                {movement.reviewStatus === "needs-review" ? "TEACHING CUE FOR REVIEW" : "PRIMARY TEACHING CUE"}
+              </Text>
               <Text style={movement.cues[0] ? s.primaryCueText : s.primaryCuePending}>
                 {movement.cues[0] ?? "Add a clear teaching cue during instructor review."}
               </Text>
@@ -3842,7 +3950,9 @@ function Details({
           </View>
         </View>
         {movement.reviewStatus === "needs-review" ? <Text style={s.planningWarning}>Instructor review required</Text> : null}
-        {movement.reviewedBy ? <Text style={s.sequenceNotice}>Reviewed by {movement.reviewedBy}</Text> : null}
+        {movement.reviewStatus === "reviewed" && movement.reviewedBy ? (
+          <Text style={s.sequenceNotice}>Reviewed by {movement.reviewedBy}</Text>
+        ) : null}
         {movement.cues.length > 1 ? (
           <>
             <Text style={s.group}>MORE TEACHING CUES</Text>
@@ -3857,11 +3967,11 @@ function Details({
           </>
         ) : null}
         {movement.manual ? <ManualReference movement={movement} /> : null}
-        {planning && movement.sideMode === "paired" ? (
+        {planning && movement.sideMode === "paired" && addition ? (
           <>
             <Text style={s.label}>PARTICIPANT WORKING SIDE</Text>
             <View style={s.options}>
-              {(["both", "left", "right"] as SideSelection[]).map((option) => (
+              {(addition.side === "both" ? ["both", "left", "right"] as const : [addition.side]).map((option) => (
                 <Pressable key={option} accessibilityRole="radio" aria-checked={side === option} onPress={() => setSide(option)}>
                   <Pill label={option === "both" ? "Both sides" : option === "left" ? "Left only" : "Right only"} active={side === option} />
                 </Pressable>
@@ -3882,8 +3992,8 @@ function Details({
               ))}
             </View>
             <Text style={s.sub}>{plan.brief.program} / {phase}</Text>
-            <Text style={remaining < duration ? s.planningWarning : s.sequenceNotice}>
-              {remaining < duration
+            <Text style={!addition || remaining < duration ? s.planningWarning : s.sequenceNotice}>
+              {!addition ? "This movement is already in the class." : remaining < duration
                 ? `Adding this movement puts ${phase.toLowerCase()} ${fmt(duration - remaining)} over target.`
                 : `${fmt(remaining - duration)} remaining after this movement.`}
             </Text>
@@ -3891,13 +4001,13 @@ function Details({
         ) : null}
       </ScrollView>
       <View style={s.sticky}>
-        <Main
+        {planning && !addition ? <Outline label="Back to Library" onPress={back} /> : <Main
           label={movement.reviewStatus === "needs-review"
             ? "Review Movement"
             : planning ? "Add to Plan" : "Edit Movement"}
           onPress={() => movement.reviewStatus === "needs-review" || !planning
             ? review() : add(phase, side)}
-        />
+        />}
         {!planning ? (
           <Pressable
             onPress={confirmDeleteMovement}
@@ -4707,6 +4817,7 @@ function Profile({
   navigate,
   manageData,
   openSecurity,
+  openWalkthrough,
   logout,
   saveStatus,
 }: {
@@ -4717,6 +4828,7 @@ function Profile({
   navigate: (screen: Tab) => void;
   manageData: () => void;
   openSecurity: () => void;
+  openWalkthrough: () => void;
   logout: () => void;
   saveStatus: "saved" | "saving" | "error";
 }) {
@@ -4934,6 +5046,10 @@ function Profile({
       <View>
         <Text style={s.group}>SUPPORT</Text>
         <View style={s.settings}>
+          <Pressable onPress={openWalkthrough} style={s.setting} accessibilityRole="button">
+            <Text style={s.settingText}>App Walkthrough</Text>
+            <ChevronRight size={20} color={C.muted} />
+          </Pressable>
           <Pressable onPress={manageData} style={s.setting}>
             <Text style={s.settingText}>App Data & Reset</Text>
             <ChevronRight size={20} color={C.muted} />
@@ -5881,7 +5997,7 @@ function BlushBodiesApp() {
     }),
   );
   const [savedPlans, setSavedPlans] = useState<ClassPlan[]>([]);
-  const [hasActiveDraft, setHasActiveDraft] = useState(true);
+  const [draftPlan, setDraftPlan] = useState<ClassPlan>();
   const [sequenceHistory, setSequenceHistory] = useState<ClassPlan[]>([]);
   const [sequenceNotice, setSequenceNotice] = useState("");
   const [libraryPlanPhase, setLibraryPlanPhase] = useState<Phase | undefined>();
@@ -5909,6 +6025,8 @@ function BlushBodiesApp() {
   const [assignmentSlotId, setAssignmentSlotId] = useState<
     string | undefined
   >();
+  const [schedulePlanReturn, setSchedulePlanReturn] = useState<"managePlan" | "generated">("managePlan");
+  const [classCreatorReturn, setClassCreatorReturn] = useState<"home" | "classes" | "assign">("home");
   const [libraryMovements, setLibraryMovements] =
     useState<LibraryMovement[]>(initialLibrary);
   const [deletedMovementIds, setDeletedMovementIds] = useState<string[]>([]);
@@ -5936,6 +6054,33 @@ function BlushBodiesApp() {
     });
   const [signedIn, setSignedIn] = useState(false);
   const [authReady, setAuthReady] = useState(!supabaseConfigured);
+  const [walkthroughOffer, setWalkthroughOffer] = useState<string>();
+  const [walkthrough, setWalkthrough] = useState<{
+    key: string;
+    index: number;
+    returnTo: "home" | "profile";
+  }>();
+  const walkthroughChecked = useRef<string | null>(null);
+  const walkthroughKey = walkthroughStorageKey(account);
+  const activeWalkthrough = walkthrough?.key === walkthroughKey ? walkthrough : undefined;
+  const walkthroughStep = activeWalkthrough && screen === walkthroughSteps[activeWalkthrough.index].tab
+    ? activeWalkthrough.index : undefined;
+  const newInstructor = !draftPlan && !savedPlans.length && !schedule.length &&
+    !sessionHistory.length && !activeTeachingSession;
+  useEffect(() => {
+    if (!authReady || !signedIn || screen !== "home" || !newInstructor ||
+        walkthroughChecked.current === walkthroughKey) return;
+
+    let active = true;
+    void AsyncStorage.getItem(walkthroughKey).then((seen) => {
+      if (!active) return;
+      walkthroughChecked.current = walkthroughKey;
+      if (!seen) setWalkthroughOffer(walkthroughKey);
+    }).catch(() => {
+      if (active) walkthroughChecked.current = walkthroughKey;
+    });
+    return () => { active = false; };
+  }, [authReady, signedIn, screen, newInstructor, walkthroughKey]);
   const [signInNotice, setSignInNotice] = useState<SignInNotice>();
   const [resetEmail, setResetEmail] = useState("");
   const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "error">(
@@ -5949,6 +6094,8 @@ function BlushBodiesApp() {
   const latestStoredData = useRef<StoredAppData | null>(null);
   const remoteWorkspaceId = useRef<string | null>(null);
   const remoteWorkspaceRevision = useRef(0);
+  const remoteWorkspaceHydrated = useRef(false);
+  const lastRemoteSave = useRef<{ workspaceId: string; key: string; value: string } | null>(null);
   const backgroundedAt = useRef<number | null>(null);
   useEffect(
     () => () => {
@@ -5976,8 +6123,8 @@ function BlushBodiesApp() {
   };
   const storedData = (owner: Account = account): StoredAppData => ({
       account: owner,
-      plan,
-      hasActiveDraft,
+      plan: draftPlan ?? plan,
+      hasActiveDraft: Boolean(draftPlan),
       savedPlans,
       sessionHistory,
       schedule,
@@ -5993,15 +6140,21 @@ function BlushBodiesApp() {
     key = userStorageKey(stored.account),
   ) => {
     const generation = ++saveGeneration.current;
+    const workspaceId = remoteWorkspaceId.current;
     const writeWorkspace = async (storageKey: string, value: string) => {
       await AsyncStorage.setItem(storageKey, value);
-      if (!remoteWorkspaceId.current) return;
+      if (!workspaceId || workspaceId !== remoteWorkspaceId.current) return;
+      const last = lastRemoteSave.current;
+      if (last?.workspaceId === workspaceId && last.key === storageKey && last.value === value) return;
       const revision = await saveRemoteWorkspaceState(
-        remoteWorkspaceId.current,
+        workspaceId,
         remoteWorkspaceRevision.current,
         JSON.parse(value) as StoredAppData,
       );
-      remoteWorkspaceRevision.current = revision;
+      if (remoteWorkspaceId.current === workspaceId) {
+        remoteWorkspaceRevision.current = revision;
+        lastRemoteSave.current = { workspaceId, key: storageKey, value };
+      }
     };
     const { task, chain } = enqueueWorkspaceSave({
       previous: saveChain.current,
@@ -6027,6 +6180,19 @@ function BlushBodiesApp() {
     const stored = storedData();
     latestStoredData.current = stored;
     if (workspaceSaveTimer.current) clearTimeout(workspaceSaveTimer.current);
+    if (remoteWorkspaceHydrated.current) {
+      remoteWorkspaceHydrated.current = false;
+      workspaceSaveTimer.current = null;
+      const workspaceId = remoteWorkspaceId.current;
+      lastRemoteSave.current = workspaceId ? {
+        workspaceId,
+        key: userStorageKey(stored.account),
+        value: JSON.stringify(stored),
+      } : null;
+      setSaveStatus("saved");
+      setPersistenceError("");
+      return;
+    }
     setSaveStatus("saving");
     workspaceSaveTimer.current = setTimeout(() => {
       workspaceSaveTimer.current = null;
@@ -6040,7 +6206,7 @@ function BlushBodiesApp() {
     signedIn,
     account,
     plan,
-    hasActiveDraft,
+    draftPlan,
     savedPlans,
     sessionHistory,
     schedule,
@@ -6089,30 +6255,80 @@ function BlushBodiesApp() {
     setTab(next);
     setScreen(next);
   };
-  const duplicatePlan = () => {
-    setEditorPhase("All");
-    setSequenceHistory([]);
-    setSequenceNotice("");
-    setPlan((current) => ({
-      ...current,
-      id: `${current.id}-copy-${Date.now()}`,
-      version: current.version + 1,
+  const openClassCreator = (from: typeof classCreatorReturn) => {
+    if (from !== "assign") setAssignmentSlotId(undefined);
+    setClassCreatorReturn(from);
+    setScreen("create");
+  };
+  const dismissWalkthrough = () => {
+    walkthroughChecked.current = walkthroughKey;
+    void AsyncStorage.setItem(walkthroughKey, "seen").catch(() => undefined);
+    setWalkthroughOffer(undefined);
+    setWalkthrough(undefined);
+  };
+  const startWalkthrough = (returnTo: "home" | "profile") => {
+    setWalkthroughOffer(undefined);
+    setWalkthrough({ key: walkthroughKey, index: 0, returnTo });
+    select("home");
+  };
+  const selectWalkthroughTab = (next: Tab) => {
+    if (activeWalkthrough) {
+      const index = walkthroughSteps.findIndex((step) => step.tab === next);
+      if (index === -1) dismissWalkthrough();
+      else setWalkthrough({ ...activeWalkthrough, index });
+    }
+    select(next);
+  };
+  const finishWalkthrough = () => {
+    dismissWalkthrough();
+    if (activeWalkthrough) select(activeWalkthrough.returnTo);
+  };
+  const showDraft = (draft: ClassPlan) => {
+    setPlan(draft);
+    setDraftPlan(draft);
+  };
+  const withDraftSlot = (id: string, proceed: () => void) => {
+    if (draftPlan && draftPlan.id !== id) {
+      confirmAction({
+        title: "Start a new draft?",
+        message: `Your ${draftPlan.brief.program} draft will move to Recently Deleted, where you can restore it.`,
+        confirmText: "Start New Draft",
+        cancelText: "Keep Current Draft",
+        onConfirm: () => {
+          archiveDraft(draftPlan);
+          proceed();
+        },
+      });
+      return;
+    }
+    proceed();
+  };
+  const duplicatePlan = (source: ClassPlan) => {
+    const draft: ClassPlan = {
+      ...source,
+      id: `${source.id}-copy-${Date.now()}`,
+      version: source.version + 1,
       status: "draft",
       brief: {
-        ...current.brief,
+        ...source.brief,
         scheduledDate: undefined,
         scheduledTime: undefined,
       },
-    }));
-    setHasActiveDraft(true);
-    setScreen("generated");
+    };
+    withDraftSlot(draft.id, () => {
+      setEditorPhase("Warm-up");
+      setSequenceHistory([]);
+      setSequenceNotice("");
+      showDraft(draft);
+      setScreen("editor");
+    });
   };
   const persistPlan = () => {
     setSequenceHistory([]);
     setSequenceNotice("");
     const saved = { ...plan, status: "saved" as const };
     setPlan(saved);
-    setHasActiveDraft(false);
+    setDraftPlan((current) => current?.id === saved.id ? undefined : current);
     setSavedPlans((current) => [
       saved,
       ...current.filter((item) => item.id !== saved.id),
@@ -6139,6 +6355,7 @@ function BlushBodiesApp() {
       });
       setAssignmentSlotId(undefined);
     }
+    setScreen("generated");
   };
   const savePlan = () => {
     if (plan.brief.scheduledDate && plan.brief.scheduledTime) {
@@ -6146,19 +6363,20 @@ function BlushBodiesApp() {
         date: plan.brief.scheduledDate,
         time: plan.brief.scheduledTime,
       };
-      const conflict = schedule.find(
-        (slot) =>
-          slot.status !== "CANCELLED" &&
-          slot.id !== assignmentSlotId &&
-          !(
-            slot.date === proposed.date &&
-            slot.time === proposed.time &&
-            (!slot.planId || slot.planId === plan.id)
-          ) &&
-          scheduleSlotsOverlap(proposed, slot),
-      );
+      if (!isFutureScheduleSlot(proposed, new Date())) {
+        showAlert("Choose a future time", "Change the class date and time, or choose Schedule Later.");
+        return;
+      }
+      const conflict = schedule.find((slot) => {
+        if (slot.status === "CANCELLED" || !scheduleSlotsOverlap(proposed, slot)) return false;
+        const sameTime = slot.date === proposed.date && slot.time === proposed.time;
+        const canAssign = sameTime && slot.status !== "COMPLETED" && slot.status !== "IN PROGRESS" &&
+          (slot.id === assignmentSlotId || !slot.planId || slot.planId === plan.id);
+        return !canAssign;
+      });
       if (conflict) {
-        setSequenceNotice(
+        showAlert(
+          "Class time unavailable",
           `This class overlaps the ${conflict.time} class on ${classDateLabel(conflict.date, true)}.`,
         );
         return;
@@ -6248,21 +6466,16 @@ function BlushBodiesApp() {
       ),
     );
     setPlan(remainingPlans[0] ?? createDefaultPlan());
-    setHasActiveDraft(false);
     setScreen("classes");
   };
-  const deleteDraft = () => {
-    if (!hasActiveDraft || plan.status !== "draft") return;
-    const draftDate = plan.brief.scheduledDate;
-    const draftTime = plan.brief.scheduledTime;
-    setSequenceHistory([]);
-    setSequenceNotice("");
-    setLibraryPlanPhase(undefined);
+  const archiveDraft = (draft: ClassPlan) => {
+    const draftDate = draft.brief.scheduledDate;
+    const draftTime = draft.brief.scheduledTime;
     const deletedItem: RecentlyDeletedItem = {
-      id: `deleted-draft-${plan.id}-${Date.now()}`,
+      id: `deleted-draft-${draft.id}-${Date.now()}`,
       kind: "draft",
       deletedAt: Date.now(),
-      plan,
+      plan: draft,
       assignments: schedule
         .filter(
           (slot) =>
@@ -6273,12 +6486,6 @@ function BlushBodiesApp() {
         .map((slot) => ({ id: slot.id, status: slot.status })),
     };
     keepRecentlyDeleted(deletedItem);
-    showUndo({
-      kind: "deleted",
-      message: `${plan.brief.program} draft deleted.`,
-      item: deletedItem,
-    });
-    setHasActiveDraft(false);
     if (draftDate && draftTime) {
       setSchedule((current) =>
         current.map((slot) =>
@@ -6290,7 +6497,21 @@ function BlushBodiesApp() {
         ),
       );
     }
-    setPlan(savedPlans[0] ?? createDefaultPlan());
+    return deletedItem;
+  };
+  const deleteDraft = () => {
+    if (!draftPlan) return;
+    setSequenceHistory([]);
+    setSequenceNotice("");
+    setLibraryPlanPhase(undefined);
+    const deletedItem = archiveDraft(draftPlan);
+    showUndo({
+      kind: "deleted",
+      message: `${draftPlan.brief.program} draft deleted.`,
+      item: deletedItem,
+    });
+    setDraftPlan(undefined);
+    if (plan.id === draftPlan.id) setPlan(savedPlans[0] ?? createDefaultPlan());
     setScreen("classes");
   };
   const assignPlan = (slotId: string, planId: string) => {
@@ -6306,9 +6527,8 @@ function BlushBodiesApp() {
     );
     setPlan(selectedPlan);
     if (targetSlot) setHomeDate(targetSlot.date);
-    setHasActiveDraft(false);
     setAssignmentSlotId(undefined);
-    setScreen("home");
+    select("home");
   };
   const schedulePlanAt = () => {
     if (plan.status !== "saved" || !classReadiness(plan, libraryMovements).ready)
@@ -6325,9 +6545,8 @@ function BlushBodiesApp() {
     };
     saveScheduledClass(slot);
     setHomeDate(date);
-    setHasActiveDraft(false);
     setAssignmentSlotId(undefined);
-    setScreen("home");
+    select("home");
   };
   const findPlan = (planId?: string) =>
     savedPlans.find((saved) => saved.id === planId) ??
@@ -6337,7 +6556,6 @@ function BlushBodiesApp() {
     setSequenceHistory([]);
     setSequenceNotice("");
     setPlan(activeTeachingSession.plan);
-    setHasActiveDraft(false);
     setScreen("teach");
   };
   const openSessionDetails = (
@@ -6378,7 +6596,6 @@ function BlushBodiesApp() {
     }
     if (!classReadiness(selectedPlan, libraryMovements).ready) {
       setPlan(selectedPlan);
-      setHasActiveDraft(false);
       setSequenceHistory([]);
       setSequenceNotice("Resolve the class readiness issues before teaching.");
       setScreen("editor");
@@ -6403,8 +6620,9 @@ function BlushBodiesApp() {
     setSequenceHistory([]);
     setSequenceNotice("");
     setPlan(selectedPlan);
-    setHasActiveDraft(false);
     if (scheduledClassId) {
+      const slot = schedule.find((item) => item.id === scheduledClassId);
+      if (slot) setHomeDate(slot.date);
       setSchedule((current) =>
         setScheduleStatus(current, scheduledClassId, "IN PROGRESS"),
       );
@@ -6424,7 +6642,6 @@ function BlushBodiesApp() {
     }
     if (!classReadiness(assignedPlan, libraryMovements).ready) {
       setPlan(assignedPlan);
-      setHasActiveDraft(false);
       showAlert(
         "Plan needs review",
         "Review the timing, sides and movement content before teaching.",
@@ -6445,27 +6662,38 @@ function BlushBodiesApp() {
     setSelectedMovement(movement);
     setScreen("details");
   }, []);
-  const changeSequence = (movements: PlanMovement[], mode?: SequenceMode) => {
-    setSequenceHistory((history) => [...history.slice(-19), plan]);
-    setPlan(updatePlanSequence(plan, movements, mode));
-    setHasActiveDraft(true);
-    setSequenceNotice("");
+  const changeSequence = (
+    movements: PlanMovement[], mode?: SequenceMode, onChange?: () => void,
+  ) => {
+    const draft = updatePlanSequence(plan, movements, mode);
+    withDraftSlot(draft.id, () => {
+      setSequenceHistory((history) => [...history.slice(-19), plan]);
+      showDraft(draft);
+      setSequenceNotice("");
+      onChange?.();
+    });
   };
   const undoSequence = () => {
     const previous = sequenceHistory[sequenceHistory.length - 1];
     if (!previous) return;
     setPlan(previous);
-    setHasActiveDraft(previous.status === "draft");
+    setDraftPlan(previous.status === "draft" ? previous : undefined);
     setSequenceHistory((history) => history.slice(0, -1));
     setSequenceNotice("Last sequence change undone.");
   };
   const addMovementToPlan = (movement: LibraryMovement, phase: Phase, side: SideSelection = "both") => {
     if (movement.reviewStatus === "needs-review") return;
     const movements = insertMovement(plan, movement, phase, `${movement.id}-${Crypto.randomUUID()}`, side);
-    changeSequence(movements);
-    setSequenceNotice(`${movement.name} added to ${phase.toLowerCase()}.`);
-    setLibraryPlanPhase(undefined);
-    setScreen("editor");
+    if (movements === plan.movements) {
+      showAlert("Movement already added", `${movement.name} is already in this class.`);
+      return;
+    }
+    changeSequence(movements, undefined, () => {
+      setSequenceNotice(`${movement.name} added to ${phase.toLowerCase()}.`);
+      if (libraryPlanPhase) setEditorPhase(phase);
+      setLibraryPlanPhase(undefined);
+      setScreen("editor");
+    });
   };
   const saveCustomMovement = (movement: LibraryMovement) => {
     const reviewed = { ...movement, reviewedBy: account.name, reviewedAt: Date.now() };
@@ -6476,26 +6704,26 @@ function BlushBodiesApp() {
       reviewed,
       ...libraryMovements.filter((item) => item.id !== movement.id),
     ];
-    const nextPlan = syncMovementImage(plan, movement.id, movement.imageUri);
-    const nextSavedPlans = savedPlans.map((saved) =>
-      syncMovementImage(saved, movement.id, movement.imageUri));
+    const updateMovement = (current: ClassPlan) =>
+      fillMissingPlanCues(syncMovementImage(current, movement.id, movement.imageUri), [reviewed]);
+    const nextPlan = updateMovement(plan);
+    const nextDraft = draftPlan ? updateMovement(draftPlan) : undefined;
+    const nextSavedPlans = savedPlans.map(updateMovement);
     const nextActiveTeachingSession = activeTeachingSession ? {
       ...activeTeachingSession,
-      plan: syncMovementImage(
-        activeTeachingSession.plan,
-        movement.id,
-        movement.imageUri,
-      ),
+      plan: updateMovement(activeTeachingSession.plan),
     } : undefined;
     setLibraryMovements(nextLibraryMovements);
     setDeletedMovementIds((current) => current.filter((id) => id !== movement.id));
     setPlan(nextPlan);
+    setDraftPlan(nextDraft);
     setSavedPlans(nextSavedPlans);
     setActiveTeachingSession(nextActiveTeachingSession);
     if (previousImageUri && previousImageUri !== movement.imageUri) {
       const references = referencedMovementImageUris({
         libraryMovements: nextLibraryMovements,
         currentPlan: nextPlan,
+        draftPlan: nextDraft,
         savedPlans: nextSavedPlans,
         activePlan: nextActiveTeachingSession?.plan,
         sequenceHistory,
@@ -6552,21 +6780,19 @@ function BlushBodiesApp() {
         setLibraryNotice(`${item.movement.name} restored to the library.`);
         setRecentlyDeletedNotice(`${item.movement.name} restored.`);
       } else if (item.kind === "draft") {
-        setPlan({ ...item.plan, status: "draft" });
-        setHasActiveDraft(true);
+        showDraft(fillMissingPlanCues({ ...item.plan, status: "draft" }, libraryMovements));
         setSchedule((current) =>
           restoreScheduleAssignments(current, item.assignments),
         );
         setRecentlyDeletedNotice(`${item.plan.brief.program} draft restored.`);
       } else {
-        const restoredPlan = { ...item.plan, status: "saved" as const };
+        const restoredPlan = fillMissingPlanCues({ ...item.plan, status: "saved" }, libraryMovements);
         setSavedPlans((current) => [
           restoredPlan,
           ...current.filter((saved) => saved.id !== restoredPlan.id),
         ]);
-        if (!hasActiveDraft || plan.status !== "draft") {
+        if (!draftPlan) {
           setPlan(restoredPlan);
-          setHasActiveDraft(false);
         }
         setSchedule((current) =>
           restoreScheduleAssignments(
@@ -6582,9 +6808,8 @@ function BlushBodiesApp() {
 
     if (
       item.kind === "draft" &&
-      hasActiveDraft &&
-      plan.status === "draft" &&
-      plan.id !== item.plan.id
+      draftPlan &&
+      draftPlan.id !== item.plan.id
     ) {
       confirmAction({
         title: "Replace current draft?",
@@ -6592,20 +6817,7 @@ function BlushBodiesApp() {
         confirmText: "Restore Draft",
         cancelText: "Keep Current",
         onConfirm: () => {
-          keepRecentlyDeleted({
-            id: `deleted-draft-${plan.id}-${Date.now()}`,
-            kind: "draft",
-            deletedAt: Date.now(),
-            plan,
-            assignments: schedule
-              .filter(
-                (slot) =>
-                  slot.status === "DRAFT" &&
-                  slot.date === plan.brief.scheduledDate &&
-                  slot.time === plan.brief.scheduledTime,
-              )
-              .map((slot) => ({ id: slot.id, status: slot.status })),
-          });
+          archiveDraft(draftPlan);
           restore();
         },
       });
@@ -6645,7 +6857,7 @@ function BlushBodiesApp() {
   const freshWorkspaceData = (owner: Account): StoredAppData => ({
     account: owner,
     plan: createDefaultPlan(initialLibrary),
-    hasActiveDraft: true,
+    hasActiveDraft: false,
     savedPlans: [],
     sessionHistory: [],
     schedule: initialSchedule,
@@ -6667,7 +6879,7 @@ function BlushBodiesApp() {
     setLibraryPlanPhase(undefined);
     setAccount(owner);
     setPlan(createDefaultPlan(initialLibrary));
-    setHasActiveDraft(true);
+    setDraftPlan(undefined);
     setSavedPlans([]);
     setSessionResult(null);
     setSelectedSession(null);
@@ -6707,18 +6919,9 @@ function BlushBodiesApp() {
         name: stored.account?.name ?? owner.name,
         phone: stored.account?.phone,
       });
-      setHasActiveDraft(
-        stored.hasActiveDraft ?? (stored.plan ? stored.plan.status === "draft" : true),
-      );
-      setSavedPlans(stored.savedPlans ?? []);
       setSessionResult(null);
       setSelectedSession(null);
       setSessionHistory(stored.sessionHistory ?? []);
-      setActiveTeachingSession(
-        isRecoverableTeachingSession(stored.activeTeachingSession)
-          ? stored.activeTeachingSession
-          : undefined,
-      );
       setSchedule(
         (stored.schedule ?? initialSchedule).map((slot) => ({
           ...slot,
@@ -6735,7 +6938,16 @@ function BlushBodiesApp() {
         removedMovementIds,
         retiredMovementIds,
       );
-      setPlan(stored.plan ?? createDefaultPlan(mergedLibrary));
+      const currentPlan = stored.plan
+        ? fillMissingPlanCues(stored.plan, mergedLibrary)
+        : createDefaultPlan(mergedLibrary);
+      const active = stored.activeTeachingSession;
+      setPlan(currentPlan);
+      setDraftPlan(stored.plan?.status === "draft" && stored.hasActiveDraft !== false ? currentPlan : undefined);
+      setSavedPlans((stored.savedPlans ?? []).map((saved) => fillMissingPlanCues(saved, mergedLibrary)));
+      setActiveTeachingSession(active && isRecoverableTeachingSession(active)
+        ? { ...active, plan: fillMissingPlanCues(active.plan, mergedLibrary) }
+        : undefined);
       setDeletedMovementIds(removedMovementIds);
       setRecentlyDeleted(retainedDeletedItems);
       setRecentlyDeletedNotice("");
@@ -6810,6 +7022,7 @@ function BlushBodiesApp() {
         initial,
       );
     }
+    remoteWorkspaceHydrated.current = true;
     await loadWorkspace(owner);
     setSignInNotice(undefined);
     setSignedIn(true);
@@ -6865,6 +7078,8 @@ function BlushBodiesApp() {
       if (event !== "SIGNED_OUT") return;
       remoteWorkspaceId.current = null;
       remoteWorkspaceRevision.current = 0;
+      remoteWorkspaceHydrated.current = false;
+      lastRemoteSave.current = null;
       setSignInNotice(undefined);
       setSignedIn(false);
       setScreen("welcome");
@@ -7407,6 +7622,11 @@ function BlushBodiesApp() {
     latestStoredData.current = null;
     remoteWorkspaceId.current = null;
     remoteWorkspaceRevision.current = 0;
+    remoteWorkspaceHydrated.current = false;
+    lastRemoteSave.current = null;
+    walkthroughChecked.current = null;
+    setWalkthroughOffer(undefined);
+    setWalkthrough(undefined);
     signInAttempts.delete(signInAttemptKey(account.role, account.email));
     setSignedIn(false);
     resetWorkspace({
@@ -7435,7 +7655,9 @@ function BlushBodiesApp() {
       clearActiveWorkspace();
       const clearCachedData = async () => {
         const keys = await AsyncStorage.getAllKeys();
-        await AsyncStorage.multiRemove([key, ...keys.filter((item) => item.startsWith(recoveryPrefix))]);
+        await AsyncStorage.multiRemove([
+          key, walkthroughKey, ...keys.filter((item) => item.startsWith(recoveryPrefix)),
+        ]);
       };
       const cleanup = await Promise.allSettled([
         clearCachedData(),
@@ -7458,7 +7680,7 @@ function BlushBodiesApp() {
   const resetAppData = async () => {
     try {
       await saveChain.current;
-      await AsyncStorage.removeItem(userStorageKey(account));
+      await AsyncStorage.multiRemove([userStorageKey(account), walkthroughKey]);
       if (supabaseConfigured) {
         const { error } = await requireSupabase().auth.signOut();
         if (error) throw error;
@@ -7618,7 +7840,7 @@ function BlushBodiesApp() {
                 (session) => session.startedAt !== completed.startedAt,
               ),
             ]);
-            setScreen("home");
+            select("home");
           }}
         />
       </View>
@@ -7650,9 +7872,9 @@ function BlushBodiesApp() {
           targetSlotId={assignmentSlotId}
           back={() => {
             setAssignmentSlotId(undefined);
-            setScreen(assignmentSlotId ? "home" : "managePlan");
+            setScreen(assignmentSlotId ? "home" : schedulePlanReturn);
           }}
-          create={() => setScreen("create")}
+          create={() => openClassCreator("assign")}
           assign={assignPlan}
           scheduleNext={schedulePlanAt}
           openSchedule={() => {
@@ -7725,9 +7947,10 @@ function BlushBodiesApp() {
           schedule={schedule}
           back={() => setScreen("classes")}
           open={() => setScreen("generated")}
-          duplicate={duplicatePlan}
+          duplicate={() => duplicatePlan(plan)}
           assign={() => {
             setAssignmentSlotId(undefined);
+            setSchedulePlanReturn("managePlan");
             setScreen("assign");
           }}
           rename={renamePlan}
@@ -7781,10 +8004,11 @@ function BlushBodiesApp() {
             selectedDate={homeDate}
             setSelectedDate={setHomeDate}
             activeSession={activeTeachingSession}
-            create={() => {
-              setAssignmentSlotId(undefined);
-              setScreen("create");
-            }}
+            create={() => openClassCreator("home")}
+            highlightPlan={walkthroughStep === 0}
+            walkthroughInvite={walkthroughOffer === walkthroughKey && newInstructor ? (
+              <WalkthroughInvite start={() => startWalkthrough("home")} dismiss={dismissWalkthrough} />
+            ) : undefined}
             assign={(slot) => {
               setAssignmentSlotId(slot.id);
               setScreen("assign");
@@ -7822,16 +8046,27 @@ function BlushBodiesApp() {
             initialClass={schedule.find(
               (slot) => slot.id === assignmentSlotId,
             )}
-            back={() => setScreen(assignmentSlotId ? "assign" : "home")}
+            back={() => setScreen(classCreatorReturn)}
             generate={(brief, fromScratch) => {
-              setEditorPhase("All");
-              const created = createPlan(brief, libraryMovements);
-              setPlan(fromScratch ? { ...created, movements: [] } : created);
-              setHasActiveDraft(true);
-              setSequenceHistory([]);
-              setSequenceNotice("");
-              setLibraryPlanPhase(undefined);
-              setScreen(fromScratch ? "editor" : "generated");
+              const draft = createPlan(brief, fromScratch ? [] : libraryMovements);
+              const openDraft = () => withDraftSlot(draft.id, () => {
+                setEditorPhase("Warm-up");
+                showDraft(draft);
+                setSequenceHistory([]);
+                setSequenceNotice("");
+                setLibraryPlanPhase(undefined);
+                setScreen("editor");
+              });
+              if (!fromScratch && !draft.movements.length) {
+                confirmAction({
+                  title: "No matching movements",
+                  message: "Change the class level or equipment, or choose movements yourself.",
+                  confirmText: "Build From Scratch",
+                  cancelText: "Change Settings",
+                  onConfirm: openDraft,
+                  Icon: Info,
+                });
+              } else openDraft();
             }}
           />
         ) : null}
@@ -7840,26 +8075,36 @@ function BlushBodiesApp() {
             plan={plan}
             library={libraryMovements}
             schedule={schedule}
-            back={() => setScreen("classes")}
-            edit={() => setScreen("editor")}
+            back={() => select("classes")}
+            edit={(phase) => {
+              setEditorPhase(phase ?? "Warm-up");
+              setScreen("editor");
+            }}
             save={savePlan}
             schedulePlan={() => {
               setAssignmentSlotId(undefined);
+              setSchedulePlanReturn("generated");
               setScreen("assign");
             }}
-            teach={() => beginTeachingSession(plan)}
+            teach={(slotId) => beginTeachingSession(plan, slotId)}
           />
         ) : null}
         {screen === "classes" ? (
           <Plans
-            plan={plan}
-            hasActiveDraft={hasActiveDraft}
+            plan={draftPlan ?? plan}
+            hasActiveDraft={Boolean(draftPlan)}
             savedPlans={savedPlans}
             schedule={schedule}
             lastSession={sessionResult}
-            create={() => setScreen("create")}
-            open={() => setScreen("generated")}
-            duplicate={duplicatePlan}
+            create={() => openClassCreator("classes")}
+            open={() => {
+              if (!draftPlan) return;
+              setEditorPhase(classReadiness(draftPlan, libraryMovements).ready ? "Warm-up" : nextPlanningPhase(draftPlan));
+              setAssignmentSlotId(undefined);
+              showDraft(draftPlan);
+              setScreen("editor");
+            }}
+            duplicate={() => duplicatePlan(draftPlan ?? plan)}
             removeDraft={deleteDraft}
             deletedCount={recentlyDeletedCount}
             openDeleted={() => {
@@ -7872,7 +8117,6 @@ function BlushBodiesApp() {
               setSequenceHistory([]);
               setSequenceNotice("");
               setPlan(selected);
-              setHasActiveDraft(false);
               setScreen("managePlan");
             }}
           />
@@ -7894,7 +8138,12 @@ function BlushBodiesApp() {
             notice={sequenceNotice}
             filter={editorPhase}
             setFilter={setEditorPhase}
-            back={() => setScreen("generated")}
+            save={savePlan}
+            back={() => plan.status === "saved" ? setScreen("generated") : select("classes")}
+            setClassDate={(slot) => showDraft({
+              ...plan,
+              brief: { ...plan.brief, scheduledDate: slot?.date, scheduledTime: slot?.time },
+            })}
             open={(phase) => {
               setLibraryPlanPhase(phase);
               setScreen("library");
@@ -7974,15 +8223,20 @@ function BlushBodiesApp() {
             }}
             manageData={() => setScreen("dataSettings")}
             openSecurity={() => setScreen("changePassword")}
+            openWalkthrough={() => startWalkthrough("profile")}
             logout={logout}
             saveStatus={saveStatus}
           />
         ) : null}
       </View>
+      {walkthroughStep !== undefined ? (
+        <WalkthroughTip index={walkthroughStep} close={finishWalkthrough} />
+      ) : null}
       {(
         ["home", "classes", "library", "insights", "profile"] as Screen[]
       ).includes(screen) ? (
-        <Nav tab={tab} setTab={select} />
+        <Nav tab={tab} setTab={selectWalkthroughTab}
+          highlightedTab={walkthroughStep === undefined ? undefined : walkthroughSteps[walkthroughStep + 1]?.tab} />
       ) : null}
       {pendingUndo ? (
         <UndoBanner
@@ -8044,6 +8298,45 @@ const s = StyleSheet.create({
   app: { flex: 1, minWidth: 0, backgroundColor: C.bg },
   flex: { flex: 1, minWidth: 0 },
   page: { paddingHorizontal: 24, paddingBottom: 28, gap: 20 },
+  walkthroughInvite: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderRadius: 16,
+    backgroundColor: C.card,
+    borderColor: C.line,
+    borderWidth: 1,
+  },
+  walkthroughInviteMain: {
+    flex: 1,
+    minHeight: 60,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingLeft: 12,
+  },
+  walkthroughTip: {
+    marginHorizontal: 16,
+    marginBottom: 8,
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#D8AAB5",
+    backgroundColor: C.card,
+    gap: 5,
+  },
+  walkthroughTipFooter: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: 8 },
+  walkthroughHint: { flex: 1, color: C.rose, fontSize: 12, fontWeight: "800" },
+  walkthroughAction: { minWidth: 44, minHeight: 44, alignItems: "center", justifyContent: "center" },
+  walkthroughPlan: { borderWidth: 3, borderColor: "#E6BBC4" },
+  walkthroughTab: {
+    marginHorizontal: 2,
+    marginVertical: 3,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: C.rose,
+    backgroundColor: "#F3E3E5",
+  },
   row: {
     minWidth: 0,
     flexDirection: "row",
@@ -8187,6 +8480,7 @@ const s = StyleSheet.create({
     gap: 15,
   },
   headerTitle: { color: C.ink, fontSize: 23, fontWeight: "800" },
+  compactHeaderTitle: { fontSize: 21, flexShrink: 1 },
   headerRight: { marginLeft: "auto", minWidth: 30, alignItems: "flex-end" },
   avatar: {
     width: 40,
@@ -8379,21 +8673,6 @@ const s = StyleSheet.create({
   },
   navLabel: { color: C.muted, fontSize: 10, fontWeight: "600" },
   navLabelOn: { color: C.rose, fontWeight: "800" },
-  steps: { height: 48, flexDirection: "row", justifyContent: "space-around" },
-  stepWrap: { alignItems: "center", gap: 4 },
-  step: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    borderWidth: 1,
-    borderColor: "#E4D7D3",
-    backgroundColor: C.card,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  stepOn: { backgroundColor: C.rose, borderColor: C.rose },
-  stepNum: { color: C.muted, fontSize: 12, fontWeight: "800" },
-  stepNumOn: { color: C.white },
   stepLabel: { color: C.muted, fontSize: 10, fontWeight: "700" },
   label: { color: C.muted, fontSize: 10, fontWeight: "800" },
   selectGroup: { gap: 8 },
@@ -8446,23 +8725,19 @@ const s = StyleSheet.create({
   },
   optionOn: { backgroundColor: "#E8CBD1" },
   optionText: { fontSize: 11, color: C.muted, fontWeight: "700" },
-  structure: { gap: 8 },
-  structureCard: {
-    backgroundColor: C.card,
-    borderRadius: 15,
-    padding: 18,
+  planDisclosure: { borderWidth: 1, borderColor: C.line, borderRadius: 14, backgroundColor: C.card },
+  planDisclosureButton: {
+    minHeight: 54,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    flexDirection: "row",
+    alignItems: "center",
     gap: 12,
   },
-  structureBar: {
-    height: 12,
-    flexDirection: "row",
-    gap: 1,
-    overflow: "hidden",
-    borderRadius: 8,
-  },
-  warm: { backgroundColor: "#E8CBD1" },
-  mainPart: { backgroundColor: C.rose },
-  structureCenter: { fontSize: 10, color: C.rose, fontWeight: "800" },
+  planDisclosureBody: { paddingHorizontal: 14, paddingBottom: 14, gap: 12 },
+  planDetailFields: { flexDirection: "row", gap: 10 },
+  planOption: { minHeight: 44, justifyContent: "center" },
+  planOptionText: { color: C.muted, fontSize: 13, fontWeight: "800", textAlign: "center" },
   sticky: {
     padding: 16,
     paddingBottom: Platform.OS === "ios" ? 28 : 16,
@@ -8718,7 +8993,6 @@ const s = StyleSheet.create({
     paddingVertical: 12,
     paddingBottom: Platform.OS === "ios" ? 28 : 16,
   },
-  editorHeader: { flexDirection: "row", alignItems: "center", gap: 12 },
   editorUndo: {
     width: 42,
     height: 42,
@@ -8729,34 +9003,40 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  sequenceHeader: { paddingHorizontal: 24, paddingBottom: 12, gap: 8, backgroundColor: C.bg },
+  sequencePage: { paddingHorizontal: 24, paddingTop: 4, paddingBottom: 24, gap: 12 },
+  sequenceFooter: {
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: Platform.OS === "ios" ? 28 : 16,
+    gap: 8,
+    borderTopWidth: 1,
+    borderTopColor: C.line,
+    backgroundColor: C.bg,
+  },
+  sequenceChecks: { maxHeight: 120 },
   phaseTimingStrip: {
-    minHeight: 76,
-    borderRadius: 15,
-    backgroundColor: C.card,
+    borderRadius: 12,
+    backgroundColor: C.paleSage,
     flexDirection: "row",
-    paddingVertical: 12,
+    padding: 4,
   },
   phaseTimingItem: {
     flex: 1,
     minWidth: 0,
+    minHeight: 48,
+    borderRadius: 8,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 5,
-    borderRightWidth: 1,
-    borderRightColor: C.line,
+    paddingHorizontal: 3,
   },
-  phaseTimingLabel: { color: C.muted, fontSize: 8, fontWeight: "900" },
+  phaseTimingItemOn: { backgroundColor: C.card },
+  phaseTimingLabel: { color: C.muted, fontSize: 11, fontWeight: "800", textAlign: "center" },
   phaseTimingValue: {
     color: C.ink,
-    fontSize: 15,
+    fontSize: 13,
     fontWeight: "900",
     marginTop: 4,
-  },
-  phaseTimingStatus: {
-    color: C.gold,
-    fontSize: 8,
-    fontWeight: "800",
-    marginTop: 3,
   },
   addMovementButton: {
     minHeight: 44,
@@ -8764,6 +9044,7 @@ const s = StyleSheet.create({
     borderColor: "#DFC8CE",
     borderRadius: 12,
     backgroundColor: "#FFF8F8",
+    paddingHorizontal: 12,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",

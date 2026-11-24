@@ -18,6 +18,7 @@ export const isOwnedMovementImageUri = (
 export const referencedMovementImageUris = ({
   libraryMovements,
   currentPlan,
+  draftPlan,
   savedPlans,
   activePlan,
   sequenceHistory = [],
@@ -25,6 +26,7 @@ export const referencedMovementImageUris = ({
 }: {
   libraryMovements: MovementImage[];
   currentPlan: MovementImagePlan;
+  draftPlan?: MovementImagePlan;
   savedPlans: MovementImagePlan[];
   activePlan?: MovementImagePlan;
   sequenceHistory?: MovementImagePlan[];
@@ -39,6 +41,7 @@ export const referencedMovementImageUris = ({
 
   libraryMovements.forEach(addMovement);
   addPlan(currentPlan);
+  addPlan(draftPlan);
   savedPlans.forEach(addPlan);
   addPlan(activePlan);
   sequenceHistory.forEach(addPlan);

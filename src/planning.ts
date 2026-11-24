@@ -4,6 +4,7 @@ export type SideSelection = "both" | "left" | "right";
 export type WorkingSide = "left" | "right" | "alternating";
 export type ClassLevel = "Beginner" | "Intermediate" | "Advanced";
 export const MOVEMENT_DURATION_SECONDS = 75;
+const MAX_FITTED_CARD_SECONDS = 5 * 60;
 export type PlanBrief = {
   program: string;
   level?: ClassLevel;
@@ -87,13 +88,18 @@ export const mergeLibraryCatalog = (
   return [
     ...availableStored.map((movement) => {
       const baseline = catalog.find((item) => item.id === movement.id);
+      const storedCues = (movement.cues ?? []).filter((cue) => typeof cue === "string" && cue.trim());
+      const cues = storedCues.length ? storedCues : baseline?.cues ?? [];
       // Refresh bundled source data, preserving explicit instructor edits and approvals.
       if (baseline?.manual) return movement.reviewedBy
-        ? { ...baseline, ...movement, manual: baseline.manual, catalogueVersion: baseline.catalogueVersion }
+        ? {
+          ...baseline, ...movement, cues,
+          reviewStatus: storedCues.length ? movement.reviewStatus ?? baseline.reviewStatus : baseline.reviewStatus,
+          manual: baseline.manual, catalogueVersion: baseline.catalogueVersion,
+        }
         : { ...baseline, ...(movement.imageUri ? { imageUri: movement.imageUri } : {}) };
       const phases = movement.phases ?? baseline?.phases;
       const sideMode = movement.sideMode ?? baseline?.sideMode;
-      const cues = movement.cues?.length ? movement.cues : baseline?.cues ?? [];
       const reviewStatus = baseline?.reviewStatus === "reviewed"
         ? "reviewed"
         : movement.reviewStatus ?? baseline?.reviewStatus;
@@ -164,6 +170,22 @@ export const movementSourceId = (movement: { id: string; sourceMovementId?: stri
   return id === "single-leg" ? "single-leg-stretch" : id;
 };
 
+export const fillMissingPlanCues = (plan: ClassPlan, library: LibraryMovement[]): ClassPlan => {
+  if (plan.movements.every((move) => move.cue?.trim())) return plan;
+  const reviewedCues = new Map(library
+    .filter((movement) => movement.reviewStatus !== "needs-review")
+    .map((movement) => [movement.id, movement.cues?.find((cue) => typeof cue === "string" && cue.trim())]));
+  let changed = false;
+  const movements = plan.movements.map((move) => {
+    if (move.cue?.trim()) return move;
+    const cue = reviewedCues.get(movementSourceId(move));
+    if (!cue) return move;
+    changed = true;
+    return { ...move, cue };
+  });
+  return changed ? { ...plan, movements } : plan;
+};
+
 export const orderMovementsByPosition = (movements: PlanMovement[]) =>
   PHASES.flatMap((phase) => {
     const phaseMoves = movements.filter((move) => move.phase === phase);
@@ -224,9 +246,25 @@ export const sideLabel = (movement: PlanMovement) => {
     side === "alternating" ? "Alternating sides" : "";
 };
 
+export const movementAddition = (plan: ClassPlan, movement: LibraryMovement, phase: Phase) => {
+  const existing = plan.movements.filter((card) => movementSourceId(card) === movement.id);
+  if (!existing.length) return { side: "both" as const, seconds: MOVEMENT_DURATION_SECONDS };
+
+  // A single side can be completed in its original phase at the same duration.
+  const [card] = existing;
+  const side = workingSide(card);
+  if (movement.sideMode === "paired" && existing.length === 1 && card.phase === phase &&
+      (side === "left" || side === "right"))
+    return { side: side === "left" ? "right" as const : "left" as const, seconds: card.duration, pairId: card.pairId };
+  return null;
+};
+
 export const insertMovement = (
   plan: ClassPlan, movement: LibraryMovement, phase: Phase, id: string, selection: SideSelection = "both",
 ) => {
+  const addition = movementAddition(plan, movement, phase);
+  if (!addition) return plan.movements;
+  if (addition.side !== "both") selection = addition.side;
   const sides: (WorkingSide | undefined)[] = movement.sideMode === "paired"
     ? selection === "both" ? ["left", "right"] : [selection]
     : [movement.sideMode === "alternating" ? "alternating" : undefined];
@@ -237,9 +275,9 @@ export const insertMovement = (
     title: movement.name,
     position: movement.sideMode === "paired" && positionGroup(movement.position) === "Side-lying"
       ? side === "left" ? "Right side-lying" : "Left side-lying" : movement.position,
-    duration: MOVEMENT_DURATION_SECONDS, phase, cue: movement.cues[0] ?? "", side,
+    duration: addition.seconds, phase, cue: movement.cues[0] ?? "", side,
     requiresPair: movement.sideMode === "paired",
-    pairId: movement.sideMode === "paired" ? id : undefined,
+    pairId: movement.sideMode === "paired" ? addition.pairId ?? id : undefined,
   }));
   const next = [...plan.movements];
   const lastInPhase = next.map((move) => move.phase).lastIndexOf(phase);
@@ -247,6 +285,34 @@ export const insertMovement = (
   const index = lastInPhase >= 0 ? lastInPhase + 1 : nextPhase >= 0 ? nextPhase : next.length;
   next.splice(index, 0, ...added);
   return plan.sequenceMode === "manual" ? next : orderMovementsByPosition(next);
+};
+
+export const fitPhaseTiming = (movements: PlanMovement[], phase: Phase) => {
+  const cards = movements.filter((card) => card.phase === phase);
+  const target = phaseTarget(phase);
+  if (cards.length * MAX_FITTED_CARD_SECONDS < target || cards.length > target ||
+      cards.reduce((sum, card) => sum + card.duration, 0) === target) return movements;
+
+  const groups = new Map<string, PlanMovement[]>();
+  for (const card of cards) {
+    const side = workingSide(card);
+    const key = side === "left" || side === "right"
+      ? `sides:${movementSourceId(card)}` : `card:${card.id}`;
+    const group = groups.get(key) ?? [];
+    group.push(card);
+    groups.set(key, group);
+  }
+  const base = Math.floor(target / cards.length);
+  let remaining = target % cards.length;
+  const durations = new Map<string, number>();
+  for (const group of [...groups.values()].sort((a, b) => b.length - a.length)) {
+    const extra = remaining >= group.length ? 1 : 0;
+    remaining -= extra * group.length;
+    for (const card of group) durations.set(card.id, base + extra);
+  }
+  if (remaining) return movements;
+  return movements.map((card) => card.phase === phase
+    ? { ...card, duration: durations.get(card.id)! } : card);
 };
 
 export const sequenceWarnings = (movements: PlanMovement[]) => {
@@ -273,20 +339,42 @@ export const sequenceWarnings = (movements: PlanMovement[]) => {
       previous = group;
     }
   }
+  const seen = new Map<string, PlanMovement>();
+  const repeated = new Set<string>();
+  for (const move of movements) {
+    const key = movementSourceId(move);
+    const previous = seen.get(key);
+    if (!previous) {
+      seen.set(key, move);
+      continue;
+    }
+    const previousSide = workingSide(previous);
+    const side = workingSide(move);
+    if (previous.phase === move.phase &&
+        ((previousSide === "left" && side === "right") ||
+         (previousSide === "right" && side === "left"))) {
+      // A third card from the same movement is still a repeat.
+      seen.set(key, { ...previous, side: "alternating" });
+    } else {
+      repeated.add(previous.title);
+    }
+  }
+  for (const title of repeated) warnings.push(`${title} appears more than once in this class.`);
   return warnings;
 };
 
-export const suggestMovements = (plan: ClassPlan, library: LibraryMovement[], phase: Phase) => {
-  const remaining = phaseRemaining(plan, phase);
+export const suggestMovements = (
+  plan: ClassPlan, library: LibraryMovement[], phase: Phase, remaining = phaseRemaining(plan, phase),
+) => {
   if (remaining <= 0) return [];
   const levels = ["Beginner", "Intermediate", "Advanced"];
   const level = levels.indexOf(planLevel(plan));
   const equipment = new Set(plan.brief.equipment.map((item) => item.toLowerCase()));
   const phaseMoves = plan.movements.filter((move) => move.phase === phase);
   const last = phaseMoves[phaseMoves.length - 1];
-  const used = new Set(phaseMoves.map(movementSourceId));
+  const used = new Set(plan.movements.map(movementSourceId));
   const candidates = library
-    .filter((move) => (move.phases ?? ["Main"]).includes(phase) &&
+    .filter((move) => !used.has(move.id) && (move.phases ?? ["Main"]).includes(phase) &&
       (!move.manual || move.reviewStatus !== "needs-review") &&
       levels.indexOf(move.level) >= 0 && levels.indexOf(move.level) <= level &&
       (phase !== "Main" || !move.mainLevel || levels.indexOf(move.mainLevel) <= level) &&
@@ -296,33 +384,26 @@ export const suggestMovements = (plan: ClassPlan, library: LibraryMovement[], ph
     .filter((move) => plan.sequenceMode !== "manual" || !last ||
       positionGroup(move.position) === positionGroup(last.position) ||
       !phaseMoves.some((existing) => positionGroup(existing.position) === positionGroup(move.position)));
-  const canFill = (target: number, choices: LibraryMovement[]) => {
-    if (target === 0) return true;
-    if (target < 0) return false;
-    let totals = new Set([0]);
-    for (const choice of choices) {
-      const duration = selectionDuration(choice);
-      for (let total = duration; total <= target; total += duration)
-        totals.add(total);
-    }
-    return totals.has(target);
-  };
+  const singles = candidates.filter((move) => move.sideMode !== "paired").length;
+  const availableCards = singles + (candidates.length - singles) * 2;
   const scored = candidates
     .map((movement) => {
       const rank = positionRank(movement.position, phase);
       const samePosition = !!last && positionGroup(last.position) === positionGroup(movement.position);
       const backtrack = !!last && rank < positionRank(last.position, phase);
-      const remainder = remaining - selectionDuration(movement);
-      const completesPhase = canFill(remainder, candidates);
+      const paired = movement.sideMode === "paired";
+      const cards = paired ? 2 : 1;
+      const remainder = remaining / MOVEMENT_DURATION_SECONDS - cards;
+      const completesPhase = Number.isInteger(remainder) &&
+        remainder <= availableCards - cards && (remainder % 2 === 0 || singles > (paired ? 0 : 1));
       return {
         movement,
         reason: movement.reviewStatus === "needs-review" ? "Review before adding" :
-          used.has(movement.id) ? "Useful repeat block" :
           samePosition ? "Same position group" : backtrack ? "Fits an earlier position group" :
           last ? "Next position group" : "First movement",
         completesPhase,
         score: (samePosition ? 100 : backtrack ? -50 : 0) - rank -
-          (used.has(movement.id) ? 250 : 0) +
+          ((movement.phases?.length ?? 1) - 1) * 10 +
           (selectionDuration(movement) === remaining ? 20 : 0) + (completesPhase ? 1000 : 0),
       };
     })
@@ -357,9 +438,7 @@ export const classReadiness = (plan: ClassPlan, library: LibraryMovement[] = [])
     if (!PHASES.includes(move.phase)) errors.push(`${move.title}: choose a valid phase.`);
     if (!Number.isInteger(move.duration) || move.duration <= 0)
       errors.push(`${move.title}: duration must be a positive number of seconds.`);
-    else if (move.duration !== MOVEMENT_DURATION_SECONDS)
-      errors.push(`${move.title}: movement time must be 1:15.`);
-    if (!move.title.trim() || !move.position.trim() || !move.cue.trim())
+    if (!move.title.trim() || !move.position.trim() || !move.cue?.trim())
       errors.push(`${move.title || "Unnamed movement"}: complete the name, position and cue.`);
     const family = movementSourceId(move);
     const source = library.find((item) => item.id === family);

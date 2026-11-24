@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  insertMovement, mergeLibraryCatalog, movementSourceId, nextPlanningPhase,
+  fillMissingPlanCues, fitPhaseTiming, insertMovement, mergeLibraryCatalog, movementSourceId, nextPlanningPhase,
   orderMovementsByPosition, phaseRemaining, phaseTotal, positionGroup,
   sequenceForTeaching, sequenceWarnings, suggestMovements, updatePlanSequence,
   classReadiness, planLevel, selectionDuration, sideLabel, syncMovementImage, workingSide, MOVEMENT_DURATION_SECONDS,
@@ -158,7 +158,8 @@ test("movement image cleanup preserves every live and recoverable reference", ()
   const uri = (name) => `file:///documents/movement-images/${name}.jpg`;
   const references = referencedMovementImageUris({
     libraryMovements: [{ imageUri: uri("library") }],
-    currentPlan: { movements: [{ imageUri: uri("draft") }] },
+    currentPlan: { movements: [{ imageUri: uri("viewed") }] },
+    draftPlan: { movements: [{ imageUri: uri("draft") }] },
     savedPlans: [{ movements: [{ imageUri: uri("saved") }] }],
     activePlan: { movements: [{ imageUri: uri("active") }] },
     sequenceHistory: [{ movements: [{ imageUri: uri("undo") }] }],
@@ -169,7 +170,7 @@ test("movement image cleanup preserves every live and recoverable reference", ()
   });
   assert.deepEqual([...references].sort(), [
     "active", "deleted-movement", "deleted-plan", "draft",
-    "library", "saved", "undo",
+    "library", "saved", "undo", "viewed",
   ].map(uri).sort());
 });
 
@@ -611,15 +612,18 @@ test("phase progress advances only when the target is met", () => {
 });
 
 test("suggestions respect phase, level, equipment and remaining time", () => {
-  const draft = plan([{ ...movement("already-added", "Standing", "Warm-up", 225), sourceMovementId: "used" }]);
+  const draft = plan([
+    { ...movement("already-added", "Standing", "Warm-up", 225), sourceMovementId: "used" },
+    { ...movement("already-in-main"), sourceMovementId: "used-in-main" },
+  ]);
   const options = { phases: ["Warm-up"] };
   const library = [libraryMovement("valid", options), libraryMovement("used", options),
+    libraryMovement("used-in-main", { phases: ["Warm-up", "Main"] }),
     libraryMovement("advanced", { ...options, level: "Advanced" }),
     libraryMovement("wrong-phase"), libraryMovement("band", { ...options, equipment: "Mat & Band" }),
     libraryMovement("unknown-level", { ...options, level: "Expert" })];
   const suggested = suggestMovements(draft, library, "Warm-up").map((item) => item.movement.id);
-  assert.equal(suggested[0], "valid");
-  assert(suggested.includes("used"));
+  assert.deepEqual(suggested, ["valid"]);
   assert.deepEqual(suggestMovements(draft, library, "Cool-down"), []);
 });
 
@@ -728,7 +732,7 @@ test("suggestions budget for both sides and surface pending review content", () 
   assert.equal(suggestMovements(draft, [{ ...sample, reviewStatus: "reviewed" }], "Main").length, 1);
 });
 
-test("suggestions can build a complete 35 minute beginner main phase", () => {
+test("unique beginner suggestions fit the 35 minute main phase with matched side timings", () => {
   const base = [
     libraryMovement("side-leg-lift", { position: "Side-lying", duration: 120, sideMode: "paired" }),
     libraryMovement("clamshell", { position: "Side-lying", duration: 120, sideMode: "paired" }),
@@ -737,16 +741,38 @@ test("suggestions can build a complete 35 minute beginner main phase", () => {
   const library = [...base, ...additionalMovements];
   let draft = plan();
   let additions = 0;
-  while (phaseRemaining(draft, "Main") > 0 && additions < 28) {
+  while (phaseRemaining(draft, "Main") > 0) {
     const suggestion = suggestMovements(draft, library, "Main")[0];
-    assert(suggestion, `No suggestion with ${phaseRemaining(draft, "Main")} seconds remaining`);
+    if (!suggestion) break;
     const reviewed = { ...suggestion.movement, reviewStatus: "reviewed" };
     const movements = insertMovement(draft, reviewed, "Main", `suggested-${additions}`);
     draft = updatePlanSequence(draft, movements);
     additions += 1;
   }
-  assert.equal(phaseTotal(draft, "Main"), 2100);
+  assert(phaseRemaining(draft, "Main") > 0);
+  const fitted = { ...draft, movements: fitPhaseTiming(draft.movements, "Main") };
+  assert.equal(phaseTotal(fitted, "Main"), 2100);
+  assert.deepEqual(sequenceWarnings(fitted.movements), []);
+  assert(fitted.movements.every((card) => card.duration > 75));
+  const paired = fitted.movements.filter((card) => card.requiresPair);
+  assert(paired.length > 0);
+  assert(paired.every((card) => paired.some((other) =>
+    card.pairId === other.pairId && card.side !== other.side && card.duration === other.duration)));
   assert(additions > 3);
+});
+
+test("manual additions prevent repeats and allow a matching side in the same phase", () => {
+  const source = libraryMovement("side-card", { sideMode: "paired", phases: ["Main", "Cool-down"] });
+  const [left] = insertMovement(plan(), source, "Main", "one", "left");
+  const draft = plan([{ ...left, duration: 120 }]);
+  assert.equal(insertMovement(draft, source, "Cool-down", "two"), draft.movements);
+  const balanced = insertMovement(draft, source, "Main", "two");
+  assert.deepEqual(balanced.map((card) => [card.side, card.duration, card.pairId]), [
+    ["left", 120, "one"], ["right", 120, "one"],
+  ]);
+  assert.equal(insertMovement(plan(balanced), source, "Main", "three"), balanced);
+  assert.deepEqual(sequenceWarnings(balanced), []);
+  assert.match(sequenceWarnings([...balanced, { ...left, id: "legacy-repeat" }])[0], /appears more than once/);
 });
 
 const completePlan = () => plan([
@@ -855,14 +881,15 @@ test("readiness blocks a movement assigned outside its approved phases", () => {
   assert.equal(classReadiness(draft, [source]).ready, true);
 });
 
-test("manual catalogue covers detailed and reference entries without inventing missing cues", () => {
+test("every manual card has a teaching cue and reference entries still require review", () => {
   assert.equal(additionalMovements.length, 65);
   const detailed = additionalMovements.filter((item) => item.manual.coverage === "detailed");
   const references = additionalMovements.filter((item) => item.manual.coverage === "reference-only");
   assert.equal(detailed.length, 53);
   assert.equal(references.length, 12);
   assert(detailed.every((item) => item.cues.length && item.manual.setup && item.manual.movement));
-  assert(references.every((item) => !item.cues.length && item.reviewStatus === "needs-review"));
+  assert(additionalMovements.every((item) => item.cues[0]?.trim()));
+  assert(references.every((item) => item.reviewStatus === "needs-review"));
   assert(additionalMovements.every((item) => item.manual.pages.every((page) => page >= 12 && page <= 78)));
   assert(additionalMovements.filter((item) => item.manual.classification === "restricted")
     .every((item) => item.reviewStatus === "needs-review"));
@@ -913,6 +940,38 @@ test("catalogue review and cues migrate into previously stored samples", () => {
   assert.deepEqual(merged.cues, curated.cues);
 });
 
+test("reference cue updates do not approve an older card with a blank cue", () => {
+  const reference = additionalMovements.find((item) => item.id === "manual-corkscrew");
+  const previous = { ...reference, cues: [" "], reviewStatus: "reviewed", reviewedBy: "Instructor" };
+  const [updated] = mergeLibraryCatalog([reference], [previous]);
+  assert.deepEqual(updated.cues, reference.cues);
+  assert.equal(updated.reviewStatus, "needs-review");
+  const ownCue = { ...previous, cues: ["My approved cue."] };
+  const [approved] = mergeLibraryCatalog([reference], [ownCue]);
+  assert.deepEqual(approved.cues, ownCue.cues);
+  assert.equal(approved.reviewStatus, "reviewed");
+});
+
+test("older plans fill blank cues from matching approved sources and keep existing edits", () => {
+  const approved = libraryMovement("shoulder-rolls", { cues: ["Roll the shoulders gently."], reviewStatus: "reviewed" });
+  const pending = libraryMovement("reference", { cues: ["Suggested cue."], reviewStatus: "needs-review" });
+  const original = plan([
+    { ...movement("shoulder-rolls-1790841600000"), cue: "" },
+    { ...movement("edited"), sourceMovementId: approved.id, cue: "My coaching cue." },
+    { ...movement("pending"), sourceMovementId: pending.id, cue: " " },
+    { ...movement("unmatched"), cue: "" },
+  ], { status: "saved" });
+  const restored = fillMissingPlanCues(original, [approved, pending]);
+  assert.equal(restored.id, original.id);
+  assert.equal(restored.version, original.version);
+  assert.equal(restored.status, "saved");
+  assert.deepEqual(restored.movements.map((move) => move.cue), [
+    approved.cues[0], "My coaching cue.", " ", "",
+  ]);
+  assert.equal(original.movements[0].cue, "");
+  assert.equal(fillMissingPlanCues(restored, [approved, pending]), restored);
+});
+
 test("catalogue merges preserve instructor approvals and explicit side choices", () => {
   const sample = libraryMovement("paired", { sideMode: "paired", reviewStatus: "needs-review" });
   const reviewed = { ...sample, sideMode: "together", reviewStatus: "reviewed", reviewedBy: "Test instructor", reviewedAt: 123 };
@@ -941,14 +1000,15 @@ test("manual migration removes retired defaults, preserves custom work and is id
 
 test("manual templates fill all phases at each level with reviewed movements and balanced sides", () => {
   for (const level of ["Beginner", "Intermediate", "Advanced"]) {
-    const generated = createCataloguePlan({ ...plan().brief, program: `${level} Pilates` }, additionalMovements, level);
-    assert.equal(generated.movements.length, 36);
-    assert.equal(phaseTotal(generated, "Warm-up"), 300);
-    assert.equal(phaseTotal(generated, "Main"), 2100);
-    assert.equal(phaseTotal(generated, "Cool-down"), 300);
-    assert.equal(new Set(generated.movements.map((item) => item.id)).size, 36);
-    assert(generated.movements.every((item) => item.sourceMovementId.startsWith("manual-")));
-    assert.deepEqual(classReadiness(generated, additionalMovements).errors, []);
+    for (const energy of ["Calm", "Flowing", "Energising", "Strong"]) {
+      const generated = createCataloguePlan({ ...plan().brief, level, energy }, additionalMovements, level);
+      assert.equal(phaseTotal(generated, "Warm-up"), 300);
+      assert.equal(phaseTotal(generated, "Main"), 2100);
+      assert.equal(phaseTotal(generated, "Cool-down"), 300);
+      assert.equal(new Set(generated.movements.map((item) => item.id)).size, generated.movements.length);
+      assert(generated.movements.every((item) => item.sourceMovementId.startsWith("manual-")));
+      assert.deepEqual(classReadiness(generated, additionalMovements), { ready: true, errors: [], warnings: [] });
+    }
   }
 });
 
@@ -970,6 +1030,11 @@ test("energy choices produce distinct ready-to-teach sequences", () => {
 
 test("templates respect removed movements and leave an incomplete draft for an empty library", () => {
   assert.deepEqual(createCataloguePlan(plan().brief, [], "empty").movements, []);
+  const sparse = createCataloguePlan(plan().brief, [
+    libraryMovement("only", { reviewStatus: "reviewed" }),
+  ], "sparse");
+  assert.equal(phaseTotal(sparse, "Main"), MOVEMENT_DURATION_SECONDS);
+  assert.equal(classReadiness(sparse).ready, false);
   const available = additionalMovements.filter((item) => item.id !== "manual-squat");
   const generated = createCataloguePlan(plan().brief, available, "deleted");
   assert(!generated.movements.some((item) => item.sourceMovementId === "manual-squat"));
@@ -991,10 +1056,21 @@ test("replacements use the live catalogue and replace both sides without losing 
   const index = original.movements.findIndex((item) => item.requiresPair && item.phase === "Main");
   assert(index >= 0);
   const family = original.movements[index].sourceMovementId;
-  const next = replaceCatalogueMovement(original, index, additionalMovements, "new");
+  const library = [...additionalMovements,
+    libraryMovement("new-paired", { reviewStatus: "reviewed", sideMode: "paired" })];
+  const next = replaceCatalogueMovement(original, index, library, "new");
   assert.equal(next.length, original.movements.length);
-  assert(!next.some((item) => item.phase === "Main" && item.sourceMovementId === family));
-  assert.deepEqual(classReadiness({ ...original, movements: orderMovementsByPosition(next) }, additionalMovements).errors, []);
+  assert(!next.some((item) => item.sourceMovementId === family));
+  assert.deepEqual(next.map((item) => item.duration), original.movements.map((item) => item.duration));
+  assert.deepEqual(classReadiness({ ...original, movements: orderMovementsByPosition(next) }, library),
+    { ready: true, errors: [], warnings: [] });
   assert(next.every((item) => item.sourceMovementId && item.cue));
+  const legacyPair = {
+    ...original,
+    movements: original.movements.map((card) => card.sourceMovementId === family
+      ? { ...card, pairId: card.id } : card),
+  };
+  const replacedLegacy = replaceCatalogueMovement(legacyPair, index, library, "legacy");
+  assert.equal(replacedLegacy.filter((card) => card.sourceMovementId === "new-paired").length, 2);
   assert.equal(replaceCatalogueMovement(original, index, [], "none"), original.movements);
 });

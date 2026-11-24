@@ -1,5 +1,6 @@
 // Generated from the user-supplied Mat Pilates manual; see data/manual-import-report.json.
 // Source excerpts retain original spelling.
+// Reference-only cues are suggested wording for instructor review.
 // cspell:disable
 import type { LibraryMovement } from "./planning";
 
@@ -704,7 +705,9 @@ export const manualMovements: LibraryMovement[] = [
     "id": "manual-crab",
     "equipment": "Mat",
     "duration": 75,
-    "cues": [],
+    "cues": [
+      "Keep your knees tucked and your back rounded. Rock onto your shoulder blades, switch the cross of your ankles, and return with control."
+    ],
     "reviewStatus": "needs-review",
     "catalogueVersion": "mat-manual-v1",
     "manual": {
@@ -720,7 +723,7 @@ export const manualMovements: LibraryMovement[] = [
       "levelNote": "Level describes this card, not every preparation. Where the manual gives only a progression table, the starting level is an app classification.",
       "notes": [
         "The unit overview identifies this as a red exercise: specialist selection and instructor review are required before class use.",
-        "The PDF supplies photographs and a name, without a complete written teaching sequence. Add and review teaching cues from the referenced video library before class use."
+        "The PDF supplies photographs and a name, without a complete written teaching sequence. Check the suggested cue against the referenced video before class use."
       ]
     }
   },
@@ -735,7 +738,9 @@ export const manualMovements: LibraryMovement[] = [
     "id": "manual-seal",
     "equipment": "Mat",
     "duration": 75,
-    "cues": [],
+    "cues": [
+      "Reach between your knees to hold your ankles. Keep your back rounded as you rock onto your shoulder blades, lightly tap your feet together, and roll back to balance."
+    ],
     "reviewStatus": "needs-review",
     "catalogueVersion": "mat-manual-v1",
     "manual": {
@@ -751,7 +756,7 @@ export const manualMovements: LibraryMovement[] = [
       "levelNote": "Level describes this card, not every preparation. Where the manual gives only a progression table, the starting level is an app classification.",
       "notes": [
         "The unit overview identifies this as a red exercise: specialist selection and instructor review are required before class use.",
-        "The PDF supplies photographs and a name, without a complete written teaching sequence. Add and review teaching cues from the referenced video library before class use."
+        "The PDF supplies photographs and a name, without a complete written teaching sequence. Check the suggested cue against the referenced video before class use."
       ]
     }
   },
@@ -766,7 +771,9 @@ export const manualMovements: LibraryMovement[] = [
     "id": "manual-neck-pull",
     "equipment": "Mat",
     "duration": 75,
-    "cues": [],
+    "cues": [
+      "Support the back of your head lightly. Keep your heels grounded as you curl forward over your legs, sit tall, and roll back down without pulling on your neck."
+    ],
     "reviewStatus": "needs-review",
     "catalogueVersion": "mat-manual-v1",
     "manual": {
@@ -782,7 +789,7 @@ export const manualMovements: LibraryMovement[] = [
       "levelNote": "Level describes this card, not every preparation. Where the manual gives only a progression table, the starting level is an app classification.",
       "notes": [
         "The unit overview identifies this as a red exercise: specialist selection and instructor review are required before class use.",
-        "The PDF supplies photographs and a name, without a complete written teaching sequence. Add and review teaching cues from the referenced video library before class use."
+        "The PDF supplies photographs and a name, without a complete written teaching sequence. Check the suggested cue against the referenced video before class use."
       ]
     }
   },
@@ -797,7 +804,9 @@ export const manualMovements: LibraryMovement[] = [
     "id": "manual-open-leg-rocker",
     "equipment": "Mat",
     "duration": 75,
-    "cues": [],
+    "cues": [
+      "Balance in a V with your legs lifted and apart. Keep the leg shape steady as you rock onto your shoulder blades and return to seated balance."
+    ],
     "reviewStatus": "needs-review",
     "catalogueVersion": "mat-manual-v1",
     "manual": {
@@ -813,7 +822,7 @@ export const manualMovements: LibraryMovement[] = [
       "levelNote": "Level describes this card, not every preparation. Where the manual gives only a progression table, the starting level is an app classification.",
       "notes": [
         "The unit overview identifies this as a red exercise: specialist selection and instructor review are required before class use.",
-        "The PDF supplies photographs and a name, without a complete written teaching sequence. Add and review teaching cues from the referenced video library before class use."
+        "The PDF supplies photographs and a name, without a complete written teaching sequence. Check the suggested cue against the referenced video before class use."
       ]
     }
   },
@@ -828,7 +837,9 @@ export const manualMovements: LibraryMovement[] = [
     "id": "manual-boomerang",
     "equipment": "Mat",
     "duration": 75,
-    "cues": [],
+    "cues": [
+      "Return through a steady Teaser balance with your ankles crossed. Lower your legs slowly, then reach your hands behind you as you fold forward."
+    ],
     "reviewStatus": "needs-review",
     "catalogueVersion": "mat-manual-v1",
     "manual": {
@@ -844,7 +855,7 @@ export const manualMovements: LibraryMovement[] = [
       "levelNote": "Level describes this card, not every preparation. Where the manual gives only a progression table, the starting level is an app classification.",
       "notes": [
         "The unit overview identifies this as a red exercise: specialist selection and instructor review are required before class use.",
-        "The PDF supplies photographs and a name, without a complete written teaching sequence. Add and review teaching cues from the referenced video library before class use."
+        "The PDF supplies photographs and a name, without a complete written teaching sequence. Check the suggested cue against the referenced video before class use."
       ]
     }
   },
@@ -1300,7 +1311,9 @@ export const manualMovements: LibraryMovement[] = [
     "id": "manual-corkscrew",
     "equipment": "Mat",
     "duration": 75,
-    "cues": [],
+    "cues": [
+      "Keep both legs together as you circle them to one side, down, and back to centre. Keep your shoulders grounded and reverse the circle with control."
+    ],
     "reviewStatus": "needs-review",
     "catalogueVersion": "mat-manual-v1",
     "manual": {
@@ -1316,7 +1329,7 @@ export const manualMovements: LibraryMovement[] = [
       "levelNote": "Level describes this card, not every preparation. Where the manual gives only a progression table, the starting level is an app classification.",
       "notes": [
         "The unit overview identifies this as a red exercise: specialist selection and instructor review are required before class use.",
-        "The PDF supplies photographs and a name, without a complete written teaching sequence. Add and review teaching cues from the referenced video library before class use."
+        "The PDF supplies photographs and a name, without a complete written teaching sequence. Check the suggested cue against the referenced video before class use."
       ]
     }
   },
@@ -1331,7 +1344,9 @@ export const manualMovements: LibraryMovement[] = [
     "id": "manual-control-and-balance",
     "equipment": "Mat",
     "duration": 75,
-    "cues": [],
+    "cues": [
+      "Keep your weight on your upper back and your head still. Reach one leg up while the other reaches overhead, then switch slowly without rocking your hips."
+    ],
     "reviewStatus": "needs-review",
     "catalogueVersion": "mat-manual-v1",
     "manual": {
@@ -1347,7 +1362,7 @@ export const manualMovements: LibraryMovement[] = [
       "levelNote": "Level describes this card, not every preparation. Where the manual gives only a progression table, the starting level is an app classification.",
       "notes": [
         "The unit overview identifies this as a red exercise: specialist selection and instructor review are required before class use.",
-        "The PDF supplies photographs and a name, without a complete written teaching sequence. Add and review teaching cues from the referenced video library before class use."
+        "The PDF supplies photographs and a name, without a complete written teaching sequence. Check the suggested cue against the referenced video before class use."
       ]
     },
     "aliases": [
@@ -1566,7 +1581,9 @@ export const manualMovements: LibraryMovement[] = [
     "id": "manual-rocking",
     "equipment": "Mat",
     "duration": 75,
-    "cues": [],
+    "cues": [
+      "Hold both ankles and press your feet back into your hands to lift your chest. Keep your neck long as you rock in a small, even arc."
+    ],
     "reviewStatus": "needs-review",
     "catalogueVersion": "mat-manual-v1",
     "manual": {
@@ -1582,7 +1599,7 @@ export const manualMovements: LibraryMovement[] = [
       "levelNote": "Level describes this card, not every preparation. Where the manual gives only a progression table, the starting level is an app classification.",
       "notes": [
         "The unit overview identifies this as a red exercise: specialist selection and instructor review are required before class use.",
-        "The PDF supplies photographs and a name, without a complete written teaching sequence. Add and review teaching cues from the referenced video library before class use."
+        "The PDF supplies photographs and a name, without a complete written teaching sequence. Check the suggested cue against the referenced video before class use."
       ]
     }
   },
@@ -2414,7 +2431,9 @@ export const manualMovements: LibraryMovement[] = [
     "id": "manual-thread-the-needle",
     "equipment": "Mat",
     "duration": 75,
-    "cues": [],
+    "cues": [
+      "From hands and knees, slide the working arm under your chest. Let your upper back rotate while keeping your hips over your knees, then return to centre."
+    ],
     "reviewStatus": "needs-review",
     "catalogueVersion": "mat-manual-v1",
     "manual": {
@@ -2429,7 +2448,7 @@ export const manualMovements: LibraryMovement[] = [
       "classification": "standard",
       "levelNote": "Level describes this card, not every preparation. Where the manual gives only a progression table, the starting level is an app classification.",
       "notes": [
-        "The PDF supplies an example name only, without a complete written teaching sequence. Add and review teaching cues from the referenced video library before class use.",
+        "The PDF supplies an example name only, without a complete written teaching sequence. Confirm the suggested cue and variation before class use.",
         "Position, working-side mode and level are provisional app categories because this page provides names only. Confirm them during instructor review."
       ]
     }
@@ -2445,7 +2464,9 @@ export const manualMovements: LibraryMovement[] = [
     "id": "manual-child-pose",
     "equipment": "Mat",
     "duration": 75,
-    "cues": [],
+    "cues": [
+      "Sit your hips back toward your heels and reach your arms forward as far as comfortable. Relax your shoulders and breathe into the back of your ribs."
+    ],
     "reviewStatus": "needs-review",
     "catalogueVersion": "mat-manual-v1",
     "manual": {
@@ -2460,7 +2481,7 @@ export const manualMovements: LibraryMovement[] = [
       "classification": "standard",
       "levelNote": "Level describes this card, not every preparation. Where the manual gives only a progression table, the starting level is an app classification.",
       "notes": [
-        "The PDF supplies an example name only, without a complete written teaching sequence. Add and review teaching cues from the referenced video library before class use.",
+        "The PDF supplies an example name only, without a complete written teaching sequence. Confirm the suggested cue and variation before class use.",
         "Position, working-side mode and level are provisional app categories because this page provides names only. Confirm them during instructor review."
       ]
     }
@@ -2476,7 +2497,9 @@ export const manualMovements: LibraryMovement[] = [
     "id": "manual-hip-flexor-stretch",
     "equipment": "Mat",
     "duration": 75,
-    "cues": [],
+    "cues": [
+      "Kneel with one foot forward. Gently tuck your pelvis and shift forward until you feel a stretch at the front of the back hip. Keep your chest upright."
+    ],
     "reviewStatus": "needs-review",
     "catalogueVersion": "mat-manual-v1",
     "manual": {
@@ -2491,7 +2514,7 @@ export const manualMovements: LibraryMovement[] = [
       "classification": "standard",
       "levelNote": "Level describes this card, not every preparation. Where the manual gives only a progression table, the starting level is an app classification.",
       "notes": [
-        "The PDF supplies an example name only, without a complete written teaching sequence. Add and review teaching cues from the referenced video library before class use.",
+        "The PDF supplies an example name only, without a complete written teaching sequence. Confirm the suggested cue and variation before class use.",
         "Position, working-side mode and level are provisional app categories because this page provides names only. Confirm them during instructor review."
       ]
     }
@@ -2507,7 +2530,9 @@ export const manualMovements: LibraryMovement[] = [
     "id": "manual-arm-opening-hold",
     "equipment": "Mat",
     "duration": 75,
-    "cues": [],
+    "cues": [
+      "Lie on your back with knees bent and feet grounded. Open both arms to the sides with palms up, keep your ribs soft, and breathe steadily."
+    ],
     "reviewStatus": "needs-review",
     "catalogueVersion": "mat-manual-v1",
     "manual": {
@@ -2522,7 +2547,7 @@ export const manualMovements: LibraryMovement[] = [
       "classification": "standard",
       "levelNote": "Level describes this card, not every preparation. Where the manual gives only a progression table, the starting level is an app classification.",
       "notes": [
-        "The PDF supplies an example name only, without a complete written teaching sequence. Add and review teaching cues from the referenced video library before class use.",
+        "The PDF supplies an example name only, without a complete written teaching sequence. Confirm the suggested cue and variation before class use.",
         "Position, working-side mode and level are provisional app categories because this page provides names only. Confirm them during instructor review."
       ]
     }
