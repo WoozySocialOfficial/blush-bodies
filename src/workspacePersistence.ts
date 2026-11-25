@@ -1,5 +1,24 @@
 export type WorkspaceSaveStatus = "saving" | "saved" | "error";
 
+export type WorkspaceSync = { workspaceId: string; revision: number; pending: boolean };
+
+export const readWorkspaceSync = (value: string | null): WorkspaceSync | undefined => {
+  if (!value) return undefined;
+  try {
+    const record = JSON.parse(value) as Partial<WorkspaceSync> | null;
+    if (record && typeof record.workspaceId === "string" && typeof record.revision === "number" &&
+        Number.isSafeInteger(record.revision) && record.revision >= 0 && typeof record.pending === "boolean")
+      return { workspaceId: record.workspaceId, revision: record.revision, pending: record.pending };
+  } catch {
+    return undefined;
+  }
+};
+
+export const workspaceErrorMessage = (error: unknown) =>
+  error && typeof error === "object" && "message" in error && typeof error.message === "string"
+    ? error.message
+    : "";
+
 export const enqueueWorkspaceSave = ({
   previous,
   write,

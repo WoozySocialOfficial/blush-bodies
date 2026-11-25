@@ -1,13 +1,14 @@
 import { StatusBar } from "expo-status-bar";
 import { additionalMovements, retiredMovementIds } from "./src/catalogue";
 import { manualMovementArtwork } from "./src/manualMovementArtwork";
-import { createCataloguePlan, replaceCatalogueMovement } from "./src/cataloguePlanning";
+import { catalogueReplacementChoices, createCataloguePlan, replaceCatalogueMovement } from "./src/cataloguePlanning";
 import {
+  advanceTeachingPosition,
   countdownCueSecond,
   isRecoverableTeachingSession,
   recoverTeachingPosition,
 } from "./src/teaching";
-import { enqueueWorkspaceSave } from "./src/workspacePersistence";
+import { enqueueWorkspaceSave, readWorkspaceSync, workspaceErrorMessage } from "./src/workspacePersistence";
 import {
   listRemoteWorkspaces,
   loadRemoteWorkspaceState,
@@ -32,12 +33,14 @@ import {
 } from "./src/movementImages";
 import {
   createWorkspaceBackupEnvelope,
+  downloadWorkspaceBackup,
   parseWorkspaceBackup,
   safeBackupImageFileName,
 } from "./src/workspaceBackup";
 import {
   assignSchedulePlan,
   filterSchedule,
+  isFinishedClass,
   isFutureScheduleSlot,
   nextAvailableClassSlot,
   removeScheduleSlot,
@@ -61,10 +64,10 @@ import {
   restoreScheduleAssignments,
 } from "./src/recentlyDeleted";
 import {
-  MOVEMENT_DURATION_SECONDS, PHASES, fillMissingPlanCues, fitPhaseTiming, insertMovement, mergeLibraryCatalog, movementAddition, movementSourceId, nextPlanningPhase,
+  MOVEMENT_DURATION_SECONDS, PHASES, fillMissingPlanCues, fitPhaseTiming, insertMovement, mergeLibraryCatalog, movementAddition, movementCompatibility, movementEquipment, movementSourceId, nextPlanningPhase,
   orderMovementsByPosition, phaseRemaining, phaseTarget, phaseTotal,
   planLevel, positionGroup, sequenceForTeaching,
-  suggestMovements, syncMovementImage, updatePlanSequence, classReadiness, selectionDuration, sideLabel, workingSide,
+  suggestMovements, syncMovementImage, updatePlanSequence, classReadiness, inspectClassReadiness, selectionDuration, sideLabel, workingSide,
   type ClassPlan, type LibraryMovement, type Phase, type PlanBrief,
   type PlanMovement, type SequenceMode, type SideSelection, type WorkingSide, type ReadinessReport,
 } from "./src/planning";
@@ -184,10 +187,12 @@ type SessionResult = {
   program?: string;
   scheduledClassId?: string;
   notes?: string;
+  practice?: boolean;
 };
 type ActiveTeachingSession = {
   plan: ClassPlan;
   scheduledClassId?: string;
+  practice?: boolean;
   startedAt: number;
   movementIndex: number;
   remainingSeconds: number;
@@ -206,6 +211,7 @@ type ScheduledClass = {
     | "DRAFT"
     | "IN PROGRESS"
     | "COMPLETED"
+    | "ENDED EARLY"
     | "CANCELLED";
   planId?: string;
 };
@@ -265,6 +271,7 @@ const USER_STORAGE_PREFIX = "@blush-bodies/user-data-v2/";
 const WORKSPACE_RECOVERY_PREFIX = "@blush-bodies/workspace-recovery-v1/";
 const userStorageKey = (account: Pick<Account, "role" | "email">) =>
   `${USER_STORAGE_PREFIX}${account.role}/${account.email.toLowerCase()}`;
+const workspaceSyncKey = (key: string) => `${key}/cloud-sync`;
 const legacyWalkthroughStorageKey = (account: Pick<Account, "role" | "email">) =>
   `@blush-bodies/walkthrough-v1/${account.role}/${account.email.toLowerCase()}`;
 const CREDENTIALS_KEY = "blush-bodies-local-credentials-v1";
@@ -716,15 +723,15 @@ function ReadinessChecks({ report }: { report: ReadinessReport }) {
     </View>
   );
 }
-function Art({ dark = false }: { dark?: boolean }) {
+function Art({ dark = false, compact = false }: { dark?: boolean; compact?: boolean }) {
   const ink = dark ? "#F2D7DC" : C.rose;
   return (
-    <View style={[s.art, dark && s.artDark]}>
+    <View style={[s.art, dark && s.artDark, compact && s.artCompact]}>
       <View
-        style={[s.artDisk, { backgroundColor: dark ? "#765F65" : "#DDBEC5" }]}
+        style={[s.artDisk, compact && s.artDiskCompact, { backgroundColor: dark ? "#765F65" : "#DDBEC5" }]}
       />
-      <View style={[s.artHead, { borderColor: ink }]} />
-      <View style={[s.artBody, { borderColor: ink }]} />
+      <View style={[s.artHead, compact && s.artHeadCompact, { borderColor: ink }]} />
+      <View style={[s.artBody, compact && s.artBodyCompact, { borderColor: ink }]} />
     </View>
   );
 }
@@ -990,17 +997,19 @@ function Welcome({
   getStarted: () => void;
   logIn: () => void;
 }) {
+  const { height } = useWindowDimensions();
+  const compact = height < 710;
   return (
-    <View style={s.welcome}>
+    <ScrollView contentContainerStyle={[s.welcome, compact && s.welcomeCompact]}>
       <StatusBar style="dark" />
       <View style={s.brand}>
         <Text style={s.brandTitle}>BLUSH BODIES</Text>
         <Text style={s.brandSub}>MOVE WITH INTENTION</Text>
       </View>
-      <Art />
+      <Art compact={compact} />
       <View style={s.welcomeCopy}>
-        <Text style={s.hero}>Plan with clarity.</Text>
-        <Text style={s.hero}>Teach with confidence.</Text>
+        <Text style={[s.hero, compact && s.heroCompact]}>Plan with clarity.</Text>
+        <Text style={[s.hero, compact && s.heroCompact]}>Teach with confidence.</Text>
         <Text style={s.sub}>
           Your instructor workspace for planning, scheduling and teaching.
         </Text>
@@ -1009,10 +1018,10 @@ function Welcome({
         <Main label="Get Started" onPress={getStarted} />
         <Outline label="Log In" onPress={logIn} />
       </View>
-    </View>
+    </ScrollView>
   );
 }
-type SignInNotice = { title: string; message: string; email?: string };
+type SignInNotice = { title: string; message: string; email?: string; verification?: boolean };
 
 function SignIn({
   back,
@@ -1020,6 +1029,7 @@ function SignIn({
   notice,
   openDemo,
   signup,
+  resendVerification,
   resetPassword,
   allowSandboxReset,
   role,
@@ -1029,6 +1039,7 @@ function SignIn({
   notice?: SignInNotice;
   openDemo?: () => Promise<void>;
   signup: () => void;
+  resendVerification: (email: string) => Promise<string | null>;
   resetPassword: (email: string) => void;
   allowSandboxReset: boolean;
   role: Role;
@@ -1037,6 +1048,19 @@ function SignIn({
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [resending, setResending] = useState(false);
+  const [passwordVisible, setPasswordVisible] = useState(false);
+  const resend = async () => {
+    if (resending) return;
+    setResending(true);
+    setError("");
+    try {
+      const message = await resendVerification(email.trim().toLowerCase());
+      if (message) setError(message);
+    } finally {
+      setResending(false);
+    }
+  };
   const isInstructor = role === "instructor";
   const submit = async () => {
     if (submitting) return;
@@ -1105,7 +1129,13 @@ function SignIn({
             placeholderTextColor={C.muted}
             style={s.formInput}
           />
-          <Text style={s.label}>PASSWORD</Text>
+          <View style={s.row}>
+            <Text style={s.label}>PASSWORD</Text>
+            <Pressable onPress={() => setPasswordVisible((visible) => !visible)}
+              accessibilityRole="button" style={s.syncRetry}>
+              <Text style={s.link}>{passwordVisible ? "Hide password" : "Show password"}</Text>
+            </Pressable>
+          </View>
           <TextInput
             accessibilityLabel="Password"
             value={password}
@@ -1113,7 +1143,9 @@ function SignIn({
               setPassword(value);
               setError("");
             }}
-            secureTextEntry
+            secureTextEntry={!passwordVisible}
+            returnKeyType="go"
+            onSubmitEditing={() => void submit()}
             autoComplete="current-password"
             textContentType="password"
             maxLength={PASSWORD_MAX_LENGTH}
@@ -1141,7 +1173,11 @@ function SignIn({
           <Main
             label={submitting ? "Checking Account..." : "Sign In"}
             onPress={submit}
+            disabled={submitting || resending}
           />
+          {notice?.verification ? (
+            <Outline label={resending ? "Requesting verification..." : "Resend verification"} onPress={() => void resend()} />
+          ) : null}
           {openDemo ? (
             <Outline
               label="Open Demo Workspace"
@@ -1706,6 +1742,8 @@ function InstructorHome({
   modify,
   remove,
   getPlanTitle,
+  openSchedule,
+  openProfile,
 }: {
   schedule: ScheduledClass[];
   account: Account;
@@ -1720,6 +1758,8 @@ function InstructorHome({
   modify: (slot: ScheduledClass) => void;
   remove: (slot: ScheduledClass) => void;
   getPlanTitle: (slot: ScheduledClass) => string | undefined;
+  openSchedule: () => void;
+  openProfile: () => void;
 }) {
   const firstName = account.name.split(" ")[0];
   const now = useLiveNow();
@@ -1729,7 +1769,7 @@ function InstructorHome({
     (item) => item.date === selectedDate && item.status !== "CANCELLED",
   );
   const readyCount = visibleSchedule.filter(
-    (item) => item.planId && item.status === "READY",
+    (item) => item.status === "READY" && getPlanTitle(item),
   ).length;
   const hour = now.getHours();
   const greeting =
@@ -1766,9 +1806,9 @@ function InstructorHome({
             teach
           </Text>
         </View>
-        <View style={s.avatar}>
+        <Pressable onPress={openProfile} style={s.avatar} accessibilityRole="button" accessibilityLabel="Open profile">
           <UserRound size={20} color={C.rose} />
-        </View>
+        </Pressable>
       </View>
       {activeSession ? (
         <Pressable
@@ -1812,7 +1852,7 @@ function InstructorHome({
         })}
       </View>
       <View style={s.row}>
-        <Text style={s.section}>{classDateLabel(selectedDate)} Classes</Text>
+        <Text style={[s.section, s.flex]}>{selectedDate === today ? "Today's classes" : classDateLabel(selectedDate, true)}</Text>
         <Pressable
           onPress={create}
           style={s.plan}
@@ -1823,11 +1863,12 @@ function InstructorHome({
           <Text style={s.planText}>Plan Class</Text>
         </Pressable>
       </View>
+      <Outline label="My Schedule" onPress={openSchedule} />
       <View style={s.stack}>
         {visibleSchedule.map((slot) => {
           const planTitle = getPlanTitle(slot);
           const inProgress = slot.status === "IN PROGRESS";
-          const completed = slot.status === "COMPLETED";
+          const completed = isFinishedClass(slot);
           const ready = Boolean(
             slot.planId && planTitle && !inProgress && !completed,
           );
@@ -1868,7 +1909,7 @@ function InstructorHome({
               <View style={s.action}>
                 {completed ? (
                   <>
-                    <Pill label="COMPLETED" active green />
+                    <Pill label={slot.status} active green={slot.status === "COMPLETED"} />
                     <View style={s.reviewCompact}>
                       <BarChart3 size={13} color={C.rose} />
                       <Text style={s.reviewCompactText}>Review</Text>
@@ -1978,7 +2019,6 @@ function AssignPlan({
   create,
   assign,
   scheduleNext,
-  openSchedule,
 }: {
   plan: ClassPlan;
   library: LibraryMovement[];
@@ -1988,8 +2028,7 @@ function AssignPlan({
   back: () => void;
   create: () => void;
   assign: (slotId: string, planId: string) => void;
-  scheduleNext: () => void;
-  openSchedule: () => void;
+  scheduleNext: (slot?: { date: string; time: string }) => void;
 }) {
   const { confirmAction } = useAppDialog();
   const now = useLiveNow();
@@ -2012,7 +2051,7 @@ function AssignPlan({
   const futureSchedule = schedule.filter(
     (slot) =>
       slot.status !== "CANCELLED" &&
-      slot.status !== "COMPLETED" &&
+      !isFinishedClass(slot) && slot.status !== "IN PROGRESS" &&
       isFutureScheduleSlot(slot, now) &&
       slot.level === planLevel(plan),
   ).sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
@@ -2122,7 +2161,7 @@ function AssignPlan({
               </Text>
             </View>
             <Pressable
-              onPress={scheduleNext}
+              onPress={() => scheduleNext()}
               style={s.assignCompact}
               accessibilityRole="button"
               accessibilityLabel={`Schedule next available class ${classDateLabel(nextAvailable.date, true)} at ${nextAvailable.time}`}
@@ -2131,6 +2170,7 @@ function AssignPlan({
               <Text style={s.assignCompactText}>Schedule</Text>
             </Pressable>
           </View>
+          <PlanDate brief={plan.brief} change={(slot) => slot && scheduleNext(slot)} booking schedule={schedule} />
           <Text style={s.group}>UPCOMING CLASS SLOTS</Text>
           {futureSchedule.map((slot) => {
             const occupied = slot.planId === plan.id;
@@ -2164,10 +2204,7 @@ function AssignPlan({
           {!futureSchedule.length ? (
             <View style={s.emptyCard}>
               <Text style={s.moveTitle}>No other upcoming classes</Text>
-              <Text style={s.sub}>
-                Use the next available slot above or choose a date in My Schedule.
-              </Text>
-              <Outline label="Open My Schedule" onPress={openSchedule} />
+              <Text style={s.sub}>Choose a date and time above to add a booking.</Text>
             </View>
           ) : null}
         </>
@@ -2191,12 +2228,14 @@ function ScheduleManager({
   remove: (id: string) => void;
 }) {
   const { confirmAction, showAlert } = useAppDialog();
+  const list = useRef<FlatList<ScheduledClass>>(null);
   const [date, setDate] = useState(dateKeyFromOffset(1));
   const [time, setTime] = useState("09:00");
   const [level, setLevel] = useState("Beginner");
   const [lesson, setLesson] = useState(PROGRAM_DAY_OPTIONS[0]);
   const [error, setError] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [showForm, setShowForm] = useState(Boolean(initialEditId));
   const [filter, setFilter] = useState<ScheduleFilter>("Upcoming");
   const now = useLiveNow();
   const timeOptions = useMemo(
@@ -2227,6 +2266,7 @@ function ScheduleManager({
     [filter, now, schedule],
   );
   const resetForm = () => {
+    setShowForm(false);
     setEditingId(null);
     setDate(dateKeyFromOffset(1));
     setTime("09:00");
@@ -2235,6 +2275,8 @@ function ScheduleManager({
     setError("");
   };
   const edit = (slot: ScheduledClass) => {
+    setShowForm(true);
+    list.current?.scrollToOffset({ offset: 0, animated: true });
     setEditingId(slot.id);
     setDate(slot.date);
     setTime(slot.time);
@@ -2285,6 +2327,9 @@ function ScheduleManager({
         ? rescheduleSlot(
             {
               ...existing,
+              ...(level !== existing.level
+                ? { planId: undefined, status: "NEEDS PLAN" as const }
+                : {}),
               level,
               lesson: lesson.trim() || "New class",
             },
@@ -2326,16 +2371,15 @@ function ScheduleManager({
   const listHeader = (
     <View style={s.scheduleHeader}>
       <Header title="My Schedule" back={back} />
-      <View style={s.profileEditor}>
+      {!showForm ? <Main label="Add Class" Icon={Plus} onPress={() => setShowForm(true)} /> : null}
+      {showForm ? <View style={s.profileEditor}>
         <View style={s.row}>
           <Text style={s.group}>
             {editingId ? "RESCHEDULE CLASS" : "ADD CLASS"}
           </Text>
-          {editingId ? (
-            <Pressable onPress={resetForm} hitSlop={10}>
-              <Text style={s.link}>Cancel reschedule</Text>
-            </Pressable>
-          ) : null}
+          <Pressable onPress={resetForm} accessibilityRole="button" hitSlop={10}>
+            <Text style={s.link}>{editingId ? "Cancel reschedule" : "Cancel"}</Text>
+          </Pressable>
         </View>
         <Text style={s.label}>CLASS DATE</Text>
         <Calendar
@@ -2402,7 +2446,7 @@ function ScheduleManager({
           label={editingId ? "Save New Time" : "Add to Schedule"}
           onPress={submit}
         />
-      </View>
+      </View> : null}
       <Text style={s.group}>{visibleSchedule.length} CLASSES</Text>
       <ScrollView
         horizontal
@@ -2433,6 +2477,7 @@ function ScheduleManager({
   );
   return (
     <FlatList
+      ref={list}
       data={visibleSchedule}
       keyExtractor={(slot) => slot.id}
       contentContainerStyle={s.page}
@@ -2463,7 +2508,7 @@ function ScheduleManager({
               active
               green={slot.status === "READY" || slot.status === "COMPLETED"}
             />
-            {slot.status !== "CANCELLED" ? (
+            {slot.status !== "CANCELLED" && slot.status !== "IN PROGRESS" && !isFinishedClass(slot) ? (
               <>
               <Pressable
                 accessibilityRole="button"
@@ -2483,7 +2528,7 @@ function ScheduleManager({
               </Pressable>
               </>
             ) : null}
-            <Pressable
+            {slot.status !== "IN PROGRESS" && !isFinishedClass(slot) ? <Pressable
               onPress={() => confirmRemove(slot)}
               hitSlop={10}
               accessibilityRole="button"
@@ -2498,7 +2543,7 @@ function ScheduleManager({
               ) : (
                 <X size={18} color={C.rose} />
               )}
-            </Pressable>
+            </Pressable> : null}
           </View>
         </View>
       )}
@@ -2619,10 +2664,12 @@ function Create({
   back,
   generate,
   initialClass,
+  library,
 }: {
   back: () => void;
   generate: (brief: PlanBrief, fromScratch: boolean) => void;
   initialClass?: ScheduledClass;
+  library: LibraryMovement[];
 }) {
   const { showAlert } = useAppDialog();
   const programs = {
@@ -2648,10 +2695,16 @@ function Create({
   const [fromScratch, setFromScratch] = useState(false);
   const [equipment, setEquipment] = useState<string[]>(["Mat"]);
   const [showDetails, setShowDetails] = useState(false);
+  const supportedEquipment = new Set(library.filter((movement) =>
+    movement.reviewStatus === "reviewed" && levels.indexOf(movement.level as typeof level) <= levels.indexOf(level),
+  ).flatMap((movement) => movementEquipment(movement.equipment).map((item) => item.toLowerCase())));
+  const equipmentOptions = ["Mat", "Band", "Ball", "Ring"].filter((item) =>
+    fromScratch || supportedEquipment.has(item.toLowerCase()));
+  const availableEquipment = equipment.filter((item) => equipmentOptions.includes(item));
 
   const submit = () => {
-    if (!equipment.length) {
-      showAlert("Choose equipment", "Select at least one item for this class.");
+    if (!availableEquipment.length) {
+      showAlert("Choose equipment", "Select an available item or switch to From scratch.");
       return;
     }
     generate({
@@ -2662,7 +2715,7 @@ function Create({
       scheduledDate: initialClass?.date,
       scheduledTime: initialClass?.time,
       energy,
-      equipment,
+      equipment: availableEquipment,
     }, fromScratch);
   };
 
@@ -2710,7 +2763,7 @@ function Create({
         <View style={s.selectGroup}>
           <Text style={s.label}>EQUIPMENT</Text>
           <View style={s.options}>
-            {["Mat", "Band", "Ball", "Ring"].map((item) => {
+            {equipmentOptions.map((item) => {
               const selected = equipment.includes(item);
               return (
                 <Pressable
@@ -2726,6 +2779,7 @@ function Create({
               );
             })}
           </View>
+          {!equipmentOptions.length ? <Text style={s.sub}>No reviewed equipment options for this level.</Text> : null}
         </View>
         <PlanDisclosure
           title="Lesson details"
@@ -2768,17 +2822,22 @@ function Create({
 function PlanDate({
   brief,
   change,
+  booking = false,
+  schedule,
 }: {
   brief: PlanBrief;
   change: (slot?: { date: string; time: string }) => void;
+  booking?: boolean;
+  schedule?: ScheduledClass[];
 }) {
   const [expanded, setExpanded] = useState(false);
   const [date, setDate] = useState(brief.scheduledDate ?? dateKeyFromOffset(1));
   const [time, setTime] = useState(brief.scheduledTime ?? "09:00");
   const now = useLiveNow();
-  const options = scheduleTimeOptions(date, now);
+  const options = scheduleTimeOptions(date, now).filter((time) =>
+    !schedule?.some((slot) => slot.status !== "CANCELLED" && scheduleSlotsOverlap({ date, time }, slot)));
   const startTime = options.includes(time) ? time : options[0] ?? "";
-  const dateLabel = brief.scheduledDate && brief.scheduledTime
+  const dateLabel = !booking && brief.scheduledDate && brief.scheduledTime
     ? `${classDateLabel(brief.scheduledDate, true)} at ${brief.scheduledTime}` : undefined;
   const done = (slot?: { date: string; time: string }) => {
     change(slot);
@@ -2787,8 +2846,8 @@ function PlanDate({
 
   return (
     <PlanDisclosure
-      title="Class date and time"
-      detail={dateLabel ?? "Optional"}
+      title={booking ? "Choose date and time" : "Class date and time"}
+      detail={booking ? undefined : dateLabel ?? "Optional"}
       expanded={expanded}
       toggle={() => {
         if (!expanded) {
@@ -2821,11 +2880,11 @@ function PlanDate({
       />
       <ChoiceSelect
         label="START TIME"
-        value={startTime || "No future times today"}
+        value={startTime || "No available times"}
         options={options}
         onChange={setTime}
       />
-      <Main label="Use Date & Time" onPress={() => done({ date, time: startTime })} disabled={!startTime} />
+      <Main label={booking ? "Schedule Class" : "Use Date & Time"} onPress={() => done({ date, time: startTime })} disabled={!startTime} />
       {dateLabel ? <Outline label="Schedule Later" onPress={() => done()} /> : null}
     </PlanDisclosure>
   );
@@ -2848,8 +2907,8 @@ function Generated({
   edit: (phase?: Phase) => void;
   rebuild: () => void;
   save: () => void;
-  schedulePlan: () => void;
-  teach: (slotId?: string) => void;
+  schedulePlan: (slotId?: string) => void;
+  teach: () => void;
 }) {
   const now = useLiveNow();
   const readiness = classReadiness(plan, library);
@@ -2861,12 +2920,15 @@ function Generated({
       (slot) =>
         slot.planId === plan.id &&
         slot.status !== "CANCELLED" &&
-        slot.status !== "COMPLETED" &&
+        !isFinishedClass(slot) &&
         scheduleSlotStartsAt(slot).getTime() + durationMs > now.getTime(),
     )
     .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`))[0];
   const nextAvailable = nextAvailableClassSlot(schedule, now);
   const scheduleLabel = nextClass ? "Schedule Another" : "Schedule Class";
+  const versionBooking = plan.sourcePlanId && schedule.find((slot) =>
+    slot.planId === plan.sourcePlanId && slot.status !== "CANCELLED" && slot.status !== "IN PROGRESS" &&
+    !isFinishedClass(slot) && isFutureScheduleSlot(slot, now));
   return (
     <View style={s.flex}>
       <ScrollView contentContainerStyle={s.page}>
@@ -2944,6 +3006,9 @@ function Generated({
           );
         })}
         <ReadinessChecks report={readiness} />
+        {saved && valid && versionBooking ? (
+          <Outline label="Use This Version for a Booking" onPress={() => schedulePlan(versionBooking.id)} />
+        ) : null}
         {saved && valid && readiness.warnings.length > 0 ? (
           <Outline label="Rebuild as Draft" onPress={rebuild} />
         ) : null}
@@ -2966,14 +3031,14 @@ function Generated({
                     ? "Save & Schedule"
                     : "Save Plan"
               }
-              onPress={saved ? (valid ? schedulePlan : rebuild) : save}
+              onPress={saved ? (valid ? () => schedulePlan() : rebuild) : save}
             />
           </View>
         </View>
       )}
       {saved && valid ? (
         <View style={s.stickySmall}>
-          <Main label="Start Class" onPress={() => teach(nextClass?.id)} />
+          <Outline label="Practise Plan" onPress={teach} />
         </View>
       ) : null}
     </View>
@@ -3015,18 +3080,21 @@ function Classes({
   const [editorError, setEditorError] = useState("");
   const [showChecks, setShowChecks] = useState(false);
   const [showOrder, setShowOrder] = useState(false);
-  const compact = useWindowDimensions().width <= 360;
   const sequenceScroll = useRef<React.ComponentRef<typeof ScrollView>>(null);
   const visible = plan.movements
     .map((movement, index) => ({ movement, index }))
     .filter((item) => filter === "All" || item.movement.phase === filter);
   const { showAlert } = useAppDialog();
-  const readiness = classReadiness(plan, library);
+  const { report: readiness, issues } = inspectClassReadiness(plan, library);
   const valid = readiness.ready;
   const mode = plan.sequenceMode ?? "auto";
+  useEffect(() => {
+    if (!valid) setShowChecks(true);
+  }, [valid]);
   const phase = filter === "All" ? nextPlanningPhase(plan) : filter;
   const suggestions = suggestMovements(plan, library, phase);
   const fittedPhase = fitPhaseTiming(plan.movements, phase);
+  const phaseIssues = issues.filter((issue) => filter === "All" || issue.phase === phase);
   const editingSource = draftMovement
     ? library.find((item) => item.id === movementSourceId(draftMovement))
     : undefined;
@@ -3048,12 +3116,19 @@ function Classes({
     applyChange(next, "manual");
   };
   const replace = (index: number) => {
-    const next = replaceCatalogueMovement(plan, index, library, Crypto.randomUUID());
-    if (next === plan.movements) {
+    const choices = catalogueReplacementChoices(plan, index, library);
+    if (!choices.length) {
       showAlert("No replacement available", "Add or review another movement for this phase and class level.");
       return;
     }
-    applyChange(next);
+    showAlert("Choose a replacement", "The replacement keeps the time and working sides of this movement.",
+      [
+        ...choices.map((movement) => ({
+          text: movement.name,
+          onPress: () => applyChange(replaceCatalogueMovement(plan, index, library, Crypto.randomUUID(), movement.id)),
+        })),
+        { text: "Cancel", style: "cancel" },
+      ], List);
   };
   const remove = (index: number) =>
     applyChange(plan.movements.filter((_, i) => i !== index));
@@ -3151,6 +3226,13 @@ function Classes({
           ) : null}
         </View>
         {notice ? <Text accessibilityLiveRegion="polite" style={s.sequenceNotice}>{notice}</Text> : null}
+        {phaseIssues.map(({ message, movementId }) => {
+          const index = movementId ? plan.movements.findIndex((movement) => movement.id === movementId) : -1;
+          return index < 0 ? <Text key={message} style={s.readinessError}>{message}</Text>
+            : <Pressable key={message} onPress={() => beginEdit(index)} accessibilityRole="button" style={s.syncRetry}>
+              <Text style={s.readinessError}>{message}</Text>
+            </Pressable>;
+        })}
         <View style={s.planDetailFields}>
           <Pressable onPress={() => open(phase)}
             style={[s.addMovementButton, s.flex]} accessibilityRole="button">
@@ -3187,33 +3269,10 @@ function Classes({
                 </Text>
               </View>
             </Pressable>
-            {compact ? (
               <Pressable onPress={() => openMovementActions(index)} style={s.editorUndo}
                 accessibilityRole="button" accessibilityLabel={`Actions for ${movementLabel(movement)}`}>
                 <Ellipsis size={20} color={C.rose} />
               </Pressable>
-            ) : (
-            <View style={s.editorTools}>
-              <Pressable onPress={() => move(index, -1)} hitSlop={7}
-                disabled={!canMoveEarlier(index)}
-                accessibilityRole="button" accessibilityLabel={`Move ${movementLabel(movement)} earlier`}>
-                <ArrowUp size={17} color={C.muted} />
-              </Pressable>
-              <Pressable onPress={() => move(index, 1)} hitSlop={7}
-                disabled={!canMoveLater(index)}
-                accessibilityRole="button" accessibilityLabel={`Move ${movementLabel(movement)} later`}>
-                <ArrowDown size={17} color={C.muted} />
-              </Pressable>
-              <Pressable onPress={() => replace(index)} hitSlop={7}
-                accessibilityRole="button" accessibilityLabel={`Replace ${movementLabel(movement)}`}>
-                <RefreshCw size={17} color={C.rose} />
-              </Pressable>
-              <Pressable onPress={() => remove(index)} hitSlop={7}
-                accessibilityRole="button" accessibilityLabel={`Remove ${movementLabel(movement)}`}>
-                <Trash2 size={17} color={C.rose} />
-              </Pressable>
-            </View>
-            )}
           </View>
         ))}
         {suggestions.length > 0 ? (
@@ -3444,7 +3503,7 @@ function Plans({
       .filter(
         (slot) =>
           slot.status !== "CANCELLED" &&
-          slot.status !== "COMPLETED" &&
+          !isFinishedClass(slot) &&
           isFutureScheduleSlot(slot, now),
       )
       .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`)),
@@ -3808,6 +3867,8 @@ function Details({
   const addition = movementAddition(plan, movement, phase);
   const side = addition && addition.side !== "both" ? addition.side : selectedSide;
   const duration = addition?.side === "both" ? selectionDuration(movement, side) : addition?.seconds ?? 0;
+  const compatibility = planning ? movementCompatibility(plan, movement, phase) : [];
+  const planIssue = compatibility[0];
   const confirmDeleteMovement = () =>
     confirmAction({
       title: "Delete movement?",
@@ -3923,7 +3984,7 @@ function Details({
           <>
             <Text style={s.label}>ADD TO PHASE</Text>
             <View style={s.options}>
-              {PHASES.map((option) => (
+              {(movement.phases?.length ? [...new Set([phase, ...movement.phases])] : PHASES).map((option) => (
                 <Pressable key={option} onPress={() => setPhase(option)} accessibilityRole="radio"
                   aria-checked={phase === option}>
                   <Pill label={option} active={phase === option} />
@@ -3931,19 +3992,23 @@ function Details({
               ))}
             </View>
             <Text style={s.sub}>{plan.brief.program} / {phase}</Text>
-            <Text style={!addition || remaining < duration ? s.planningWarning : s.sequenceNotice}>
-              {!addition ? "This movement is already in the class." : remaining < duration
-                ? `Adding this movement puts ${phase.toLowerCase()} ${fmt(duration - remaining)} over target.`
+            <Text style={planIssue || !addition ? s.planningWarning : s.sequenceNotice}>
+              {planIssue ? `${movement.name}: ${planIssue}` : !addition ? "This movement is already in the class." : remaining < duration
+                ? `The app will adjust ${phase.toLowerCase()} timing to keep the phase on target.`
                 : `${fmt(remaining - duration)} remaining after this movement.`}
             </Text>
           </>
         ) : null}
       </ScrollView>
       <View style={s.sticky}>
+        {planning && planIssue && movement.reviewStatus !== "needs-review" ? (
+          <Text style={s.readinessError}>{movement.name}: {planIssue}</Text>
+        ) : null}
         {planning && !addition ? <Outline label="Back to Library" onPress={back} /> : <Main
           label={movement.reviewStatus === "needs-review"
             ? "Review Movement"
-            : planning ? "Add to Plan" : "Edit Movement"}
+            : planning ? remaining < duration ? "Add & Fit Phase" : "Add to Plan" : "Edit Movement"}
+          disabled={planning && Boolean(planIssue) && movement.reviewStatus !== "needs-review"}
           onPress={() => movement.reviewStatus === "needs-review" || !planning
             ? review() : add(phase, side)}
         />}
@@ -3979,11 +4044,11 @@ function Summary({
       <ScrollView contentContainerStyle={s.page}>
         <Header title="Session Summary" />
         <View style={s.summaryHero}>
-          <View style={s.summaryCheck}>
-            <Check size={28} color={C.white} />
+          <View style={[s.summaryCheck, !complete && s.summaryEarly]}>
+            {complete ? <Check size={28} color={C.white} /> : <Clock3 size={28} color={C.rose} />}
           </View>
           <Text style={s.summaryTitle}>
-            {complete ? "Class complete" : "Class ended early"}
+            {result.practice ? "Practice ended" : complete ? "Class complete" : "Class ended early"}
           </Text>
           <Text style={s.sub}>
             {plan.brief.program} · {plan.brief.week} · {plan.brief.day}
@@ -4009,7 +4074,7 @@ function Summary({
             <Text style={s.duration}>STATUS</Text>
           </View>
         </View>
-        <View style={s.why}>
+        {!result.practice ? <View style={s.why}>
           <Text style={s.whyLabel}>DELIVERY RECORD</Text>
           <Text style={s.whyCopy}>
             Started{" "}
@@ -4030,8 +4095,8 @@ function Summary({
               ? "The full reviewed sequence was delivered."
               : "The original plan remains unchanged and this early finish is recorded separately."}
           </Text>
-        </View>
-        <View style={s.selectGroup}>
+        </View> : null}
+        {!result.practice ? <View style={s.selectGroup}>
           <Text style={s.label}>GENERAL TEACHING NOTES</Text>
           <TextInput
             value={notes}
@@ -4042,10 +4107,10 @@ function Summary({
             placeholderTextColor={C.muted}
             style={s.notes}
           />
-        </View>
+        </View> : null}
       </ScrollView>
       <View style={s.sticky}>
-        <Main label="Save Summary" onPress={() => done(notes.trim())} />
+        <Main label={result.practice ? "Done" : "Save Summary"} onPress={() => done(notes.trim())} />
       </View>
     </View>
   );
@@ -4054,11 +4119,15 @@ function SessionDetails({
   result,
   scheduledClass,
   back,
+  saveNotes,
 }: {
   result: SessionResult;
   scheduledClass?: ScheduledClass;
   back: () => void;
+  saveNotes: (notes: string) => void;
 }) {
+  const [editingNotes, setEditingNotes] = useState(false);
+  const [notes, setNotes] = useState(result.notes ?? "");
   const complete = result.completed === result.total;
   const completion = result.total
     ? Math.round((result.completed / result.total) * 100)
@@ -4067,8 +4136,8 @@ function SessionDetails({
     <ScrollView contentContainerStyle={s.page}>
       <Header title="Session Details" back={back} />
       <View style={s.sessionDetailHero}>
-        <View style={s.summaryCheck}>
-          <Check size={28} color={C.white} />
+        <View style={[s.summaryCheck, !complete && s.summaryEarly]}>
+          {complete ? <Check size={28} color={C.white} /> : <Clock3 size={28} color={C.rose} />}
         </View>
         <View style={s.flex}>
           <Text style={s.summaryTitle}>
@@ -4148,9 +4217,23 @@ function SessionDetails({
       </View>
       <View style={s.sessionNotes}>
         <Text style={s.group}>INSTRUCTOR NOTES</Text>
-        <Text style={result.notes ? s.whyCopy : s.sub}>
-          {result.notes || "No notes were added for this session."}
-        </Text>
+        {editingNotes ? <>
+          <TextInput value={notes} onChangeText={setNotes} accessibilityLabel="Instructor notes"
+            multiline style={s.notes} />
+          <Main label="Save Notes" onPress={() => {
+            saveNotes(notes.trim());
+            setEditingNotes(false);
+          }} />
+          <Outline label="Cancel" onPress={() => setEditingNotes(false)} />
+        </> : <>
+          <Text style={result.notes ? s.whyCopy : s.sub}>
+            {result.notes || "No notes were added for this session."}
+          </Text>
+          <Outline label={result.notes ? "Edit Notes" : "Add Notes"} onPress={() => {
+            setNotes(result.notes ?? "");
+            setEditingNotes(true);
+          }} />
+        </>}
       </View>
     </ScrollView>
   );
@@ -4219,6 +4302,13 @@ const LibraryMovementRow = memo(function LibraryMovementRow({
 function Library({
   movements,
   favourites,
+  planningPhase,
+  planningPlan,
+  query,
+  setQuery,
+  filter,
+  setFilter,
+  scrollOffset,
   notice,
   open,
   create,
@@ -4229,6 +4319,13 @@ function Library({
 }: {
   movements: LibraryMovement[];
   favourites: string[];
+  planningPhase?: Phase;
+  planningPlan: ClassPlan;
+  query: string;
+  setQuery: (query: string) => void;
+  filter: string;
+  setFilter: (filter: string) => void;
+  scrollOffset: React.RefObject<number>;
   notice?: string;
   open: (movement: LibraryMovement) => void;
   create: () => void;
@@ -4237,14 +4334,15 @@ function Library({
   deletedCount: number;
   openDeleted: () => void;
 }) {
-  const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState("All");
+  const list = useRef<FlatList<LibraryMovement>>(null);
+  const restoreOffset = useRef(scrollOffset.current);
   const deferredQuery = useDeferredValue(query);
   const favouriteIds = useMemo(() => new Set(favourites), [favourites]);
   const visible = useMemo(() => {
     const needle = deferredQuery.trim().toLowerCase();
     return movements.filter(
       (movement) =>
+        (!planningPhase || !movementCompatibility(planningPlan, movement, planningPhase).length) &&
         (filter === "All" ||
           (filter === "Favourites" && favouriteIds.has(movement.id)) ||
           (filter === "Needs review" && movement.reviewStatus === "needs-review") ||
@@ -4261,7 +4359,12 @@ function Library({
             movement.level,
           ].some((value) => value.toLowerCase().includes(needle))),
     );
-  }, [deferredQuery, favouriteIds, filter, movements]);
+  }, [deferredQuery, favouriteIds, filter, movements, planningPhase, planningPlan]);
+  const resetScroll = () => {
+    restoreOffset.current = 0;
+    scrollOffset.current = 0;
+    list.current?.scrollToOffset({ offset: 0, animated: false });
+  };
   const renderMovement = useCallback(
     ({ item }: { item: LibraryMovement }) => (
       <LibraryMovementRow
@@ -4279,7 +4382,7 @@ function Library({
         {back ? <Pressable onPress={back} accessibilityRole="button" accessibilityLabel="Back to class sequence" style={s.libraryBack}>
           <ArrowLeft size={22} color={C.ink} />
         </Pressable> : null}
-        <Text style={s.headerTitle}>Movement Library</Text>
+        <Text style={[s.headerTitle, s.flex]}>{planningPhase ? `Add to ${planningPhase.toLowerCase()}` : "Movement Library"}</Text>
         <View style={s.headerActions}>
           <Pressable
             onPress={openDeleted}
@@ -4304,11 +4407,12 @@ function Library({
           </Pressable>
         </View>
       </View>
+      {planningPhase ? <Text style={s.sub}>Movements for this phase and class level.</Text> : null}
       <View style={s.search}>
         <Search size={20} color={C.muted} />
         <TextInput
           value={query}
-          onChangeText={setQuery}
+          onChangeText={(value) => { resetScroll(); setQuery(value); }}
           placeholder="Search movement, series or position"
           placeholderTextColor={C.muted}
           style={s.input}
@@ -4323,7 +4427,7 @@ function Library({
         {[
           "All",
           "Favourites",
-          "Needs review",
+          ...(planningPhase ? [] : ["Needs review"]),
           "Warm-up",
           "Main",
           "Cool-down",
@@ -4336,7 +4440,7 @@ function Library({
         ].map((option) => (
           <Pressable
             key={option}
-            onPress={() => setFilter(option)}
+            onPress={() => { resetScroll(); setFilter(option); }}
             accessibilityRole="radio"
             accessibilityState={{ checked: filter === option }}
             accessibilityLabel={`${option} movements`}
@@ -4351,6 +4455,15 @@ function Library({
   );
   return (
     <FlatList
+      ref={list}
+      onScroll={(event) => { scrollOffset.current = event.nativeEvent.contentOffset.y; }}
+      scrollEventThrottle={100}
+      onContentSizeChange={(_, height) => {
+        const offset = restoreOffset.current;
+        if (offset <= 0 || height <= offset) return;
+        restoreOffset.current = 0;
+        list.current?.scrollToOffset({ offset, animated: false });
+      }}
       data={visible}
       keyExtractor={(movement) => movement.id}
       contentContainerStyle={s.page}
@@ -4361,7 +4474,14 @@ function Library({
       ListHeaderComponent={header}
       renderItem={renderMovement}
       ListEmptyComponent={
-        <Text style={s.empty}>No movements match your search.</Text>
+        <View style={s.emptyCard}>
+          <Text style={s.sub}>No movements match your search.</Text>
+          {query || filter !== "All" ? <Outline label="Clear filters" onPress={() => {
+            resetScroll();
+            setQuery("");
+            setFilter("All");
+          }} /> : null}
+        </View>
       }
     />
   );
@@ -4600,11 +4720,14 @@ function Insights({
   sessions,
   schedule,
   openSession,
+  readyForSlot,
 }: {
   sessions: SessionResult[];
   schedule: ScheduledClass[];
   openSession: (session: SessionResult) => void;
+  readyForSlot: (slot: ScheduledClass) => boolean;
 }) {
+  const now = useLiveNow();
   const [period, setPeriod] = useState<"7 days" | "30 days" | "All">("7 days");
   const days = period === "7 days" ? 7 : period === "30 days" ? 30 : Infinity;
   const cutoff = Number.isFinite(days) ? Date.now() - days * 86400000 : 0;
@@ -4625,15 +4748,10 @@ function Insights({
           100,
       )
     : 0;
-  const activeSchedule = schedule.filter(
-    (slot) => slot.status !== "CANCELLED",
-  );
-  const readyRate = activeSchedule.length
-    ? Math.round(
-        (activeSchedule.filter((slot) => slot.planId).length /
-          activeSchedule.length) * 100,
-      )
-    : 0;
+  const upcoming = schedule.filter((slot) =>
+    slot.status !== "CANCELLED" && !isFinishedClass(slot) && slot.status !== "IN PROGRESS" &&
+    isFutureScheduleSlot(slot, now));
+  const readyCount = upcoming.filter(readyForSlot).length;
   return (
     <ScrollView contentContainerStyle={s.page}>
       <View style={s.row}>
@@ -4655,7 +4773,7 @@ function Insights({
           [String(visible.length), "Classes"],
           [String(minutes), "Minutes"],
           [String(plans), "Plans used"],
-          [`${readyRate}%`, "Schedule ready"],
+          [`${readyCount}/${upcoming.length}`, "Upcoming ready"],
         ].map((metric) => (
           <View key={metric[1]} style={s.stat}>
             <Text style={s.statBig}>{metric[0]}</Text>
@@ -4962,9 +5080,9 @@ function Profile({
           </View>
           <View style={s.setting}>
             <View style={s.flex}>
-              <Text style={s.settingText}>Offline ready</Text>
+              <Text style={s.settingText}>Saved copy on this device</Text>
               <Text style={s.duration}>
-                Plans and movement photos are stored on this device
+                Recently opened workspace data is cached here
               </Text>
             </View>
             <Check size={20} color={C.sage} />
@@ -4988,13 +5106,10 @@ function Profile({
             <ChevronRight size={20} color={C.muted} />
           </Pressable>
           <Pressable
-            onPress={() =>
-              showAlert(
-                "Help & Support",
-                "Email support@blushbodies.com for assistance.",
-              )
-            }
+            onPress={() => void Linking.openURL("mailto:support@blushbodies.com").catch(() =>
+              showAlert("Help & Support", "Email support@blushbodies.com for assistance."))}
             style={s.setting}
+            accessibilityRole="button"
           >
             <Text style={s.settingText}>Help & Support</Text>
             <ChevronRight size={20} color={C.muted} />
@@ -5008,8 +5123,8 @@ function Profile({
         {saveStatus === "saving"
           ? "Saving changes..."
           : saveStatus === "error"
-            ? "Changes are not saved. Keep the app open and try again."
-            : "All changes saved on this device."}
+            ? "Changes need attention."
+            : supabaseConfigured ? "Workspace synced." : "Changes saved on this device."}
       </Text>
       <Outline label="Log Out" onPress={logout} />
     </ScrollView>
@@ -5267,22 +5382,22 @@ function DataSettings({
             {restoring ? "Checking backup..." : "Restore workspace backup"}
           </Text>
           <Text style={s.backupCopy}>
-            Replace this account's local data with a saved backup file.
+            Preview a backup before replacing your workspace.
           </Text>
         </View>
       </Pressable>
       <Text style={s.group}>{sharedWorkspace ? "LOCAL CACHE" : "DELETE ACCOUNT"}</Text>
-      <Pressable
+      {sharedWorkspace ? (
+        <Outline label="Clear local cache and sign out" onPress={() => { if (!deleting) confirmReset(); }} />
+      ) : <Pressable
         accessibilityRole="button"
         disabled={deleting}
         onPress={confirmReset}
         style={s.dangerAction}
       >
         <Trash2 size={19} color="#A34848" />
-        <Text style={s.dangerText}>
-          {sharedWorkspace ? "Clear local cache and sign out" : "Delete account and local data"}
-        </Text>
-      </Pressable>
+        <Text style={s.dangerText}>Delete account and local data</Text>
+      </Pressable>}
       {deleteAccount ? (
         <>
           <Text style={s.group}>DELETE ACCOUNT</Text>
@@ -5333,7 +5448,7 @@ function ManagePlan({
       (slot) =>
         slot.planId === plan.id &&
         slot.status !== "CANCELLED" &&
-        slot.status !== "COMPLETED" &&
+        !isFinishedClass(slot) &&
         isFutureScheduleSlot(slot, now),
     )
     .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`))[0];
@@ -5499,7 +5614,6 @@ function TeachingSession({
   const [held, setHeld] = useState(session.held);
   const [index, setIndex] = useState(restored.movementIndex);
   const [startedAt] = useState(session.startedAt);
-  const [moveTime, setMoveTime] = useState(restored.remainingSeconds);
   const completionPlayer = useAudioPlayer(
     require("./assets/class-complete.wav"),
   );
@@ -5515,7 +5629,6 @@ function TeachingSession({
   const cardOpacity = useRef(new Animated.Value(1)).current;
   const transitioning = useRef(false);
   const current = movements[index];
-  const sequenceProgress = movements.length > 0 ? (index + 1) / movements.length : 0;
   const saveCheckpoint = (
     movementIndex: number,
     remainingSeconds: number,
@@ -5550,7 +5663,6 @@ function TeachingSession({
       indexRef.current = safe;
       moveTimeRef.current = movements[safe].duration;
       setIndex(safe);
-      setMoveTime(movements[safe].duration);
       lastTickAt.current = Date.now();
       saveCheckpoint(safe, movements[safe].duration, held);
       cardOffset.setValue(52);
@@ -5586,8 +5698,9 @@ function TeachingSession({
       planId: plan.id,
       program: plan.brief.program,
       scheduledClassId: session.scheduledClassId,
+      practice: session.practice,
     };
-    if (!completed || !preferences.completionSound) {
+    if (!completed || session.practice || !preferences.completionSound) {
       finish(result);
       return;
     }
@@ -5617,26 +5730,12 @@ function TeachingSession({
     if (held) return;
     const tick = () => {
       const now = Date.now();
-      let elapsedSeconds = Math.floor((now - lastTickAt.current) / 1000);
+      const elapsedSeconds = Math.floor((now - lastTickAt.current) / 1000);
       if (elapsedSeconds < 1) return;
       lastTickAt.current += elapsedSeconds * 1000;
-      let nextIndex = indexRef.current;
-      let remainingSeconds = moveTimeRef.current;
-
-      while (elapsedSeconds > 0) {
-        if (elapsedSeconds < remainingSeconds) {
-          remainingSeconds -= elapsedSeconds;
-          elapsedSeconds = 0;
-          break;
-        }
-        elapsedSeconds -= remainingSeconds;
-        if (nextIndex === movements.length - 1) {
-          remainingSeconds = 0;
-          break;
-        }
-        nextIndex += 1;
-        remainingSeconds = Math.max(1, movements[nextIndex].duration);
-      }
+      const { movementIndex: nextIndex, remainingSeconds } = advanceTeachingPosition({
+        movementIndex: indexRef.current, remainingSeconds: moveTimeRef.current,
+      }, movements, elapsedSeconds);
 
       const movementChanged = nextIndex !== indexRef.current;
       indexRef.current = nextIndex;
@@ -5660,7 +5759,6 @@ function TeachingSession({
       } else if (remainingSeconds > 3) {
         lastCountdownCue.current = null;
       }
-      setMoveTime(remainingSeconds);
     };
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
@@ -5754,22 +5852,6 @@ function TeachingSession({
           veryCompactTeachingView && s.movementCardTitleVeryCompact,
         ]}>{current.title}</Text>
         {sideLabel(current) ? <Text style={[s.sub, s.movementWorkingSide]}>Participant · {sideLabel(current)}</Text> : null}
-        <View style={s.movementProgressRow}>
-          <Text style={s.movementCardCount}>
-            Class progress
-          </Text>
-          <Text style={s.movementProgressValue}>
-            {Math.round(sequenceProgress * 100)}%
-          </Text>
-        </View>
-        <View style={s.movementProgressTrack}>
-          <View
-            style={[
-              s.movementProgressFill,
-              { width: `${sequenceProgress * 100}%` },
-            ]}
-          />
-        </View>
         <View
           style={[
             s.movementArtwork,
@@ -5909,8 +5991,9 @@ function TeachingSession({
   );
 }
 
-function BlushBodiesApp() {
+function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => void }) {
   const { confirmAction, showAlert } = useAppDialog();
+  const { width } = useWindowDimensions();
   const [screen, setScreen] = useState<Screen>("welcome");
   const [signupReturnScreen, setSignupReturnScreen] = useState<
     "welcome" | "signin" | "forgotPassword"
@@ -5937,6 +6020,15 @@ function BlushBodiesApp() {
   const [sequenceNotice, setSequenceNotice] = useState("");
   const [libraryPlanPhase, setLibraryPlanPhase] = useState<Phase | undefined>();
   const [libraryNotice, setLibraryNotice] = useState("");
+  const [libraryQuery, setLibraryQuery] = useState("");
+  const [libraryFilter, setLibraryFilter] = useState("All");
+  const libraryScrollOffset = useRef(0);
+  const desktop = Platform.OS === "web" && width >= 1080;
+  const showLibraryPane = desktop && screen === "details";
+  const showPlansPane = desktop && screen === "editor";
+  useEffect(() => {
+    setWideLayout(showLibraryPane || showPlansPane);
+  }, [setWideLayout, showLibraryPane, showPlansPane]);
   const [editorPhase, setEditorPhase] = useState<"All" | Phase>("All");
   const [sessionResult, setSessionResult] = useState<SessionResult | null>(
     null,
@@ -5952,15 +6044,20 @@ function BlushBodiesApp() {
     ActiveTeachingSession | undefined
   >();
   const [schedule, setSchedule] = useState<ScheduledClass[]>(initialSchedule);
+  const displaySchedule = useMemo(() => schedule.map((slot) => {
+    if (slot.status !== "COMPLETED") return slot;
+    const result = sessionHistory.find((session) => session.scheduledClassId === slot.id);
+    return result && result.completed < result.total ? { ...slot, status: "ENDED EARLY" as const } : slot;
+  }), [schedule, sessionHistory]);
   const [homeDate, setHomeDate] = useState(localDateKey());
   const [scheduleEditId, setScheduleEditId] = useState<string | undefined>();
   const [scheduleReturnScreen, setScheduleReturnScreen] = useState<
-    "profile" | "home" | "assign"
+    "profile" | "home"
   >("profile");
   const [assignmentSlotId, setAssignmentSlotId] = useState<
     string | undefined
   >();
-  const [schedulePlanReturn, setSchedulePlanReturn] = useState<"managePlan" | "generated">("managePlan");
+  const [schedulePlanReturn, setSchedulePlanReturn] = useState<"managePlan" | "generated" | "home">("home");
   const [classCreatorReturn, setClassCreatorReturn] = useState<"home" | "classes" | "assign">("home");
   const [libraryMovements, setLibraryMovements] =
     useState<LibraryMovement[]>(initialLibrary);
@@ -6002,7 +6099,7 @@ function BlushBodiesApp() {
   const latestStoredData = useRef<StoredAppData | null>(null);
   const remoteWorkspaceId = useRef<string | null>(null);
   const remoteWorkspaceRevision = useRef(0);
-  const remoteWorkspaceHydrated = useRef(false);
+  const remoteWorkspaceHydrated = useRef<"saved" | "error" | null>(null);
   const lastRemoteSave = useRef<{ workspaceId: string; key: string; value: string } | null>(null);
   const backgroundedAt = useRef<number | null>(null);
   useEffect(
@@ -6050,17 +6147,32 @@ function BlushBodiesApp() {
     const generation = ++saveGeneration.current;
     const workspaceId = remoteWorkspaceId.current;
     const writeWorkspace = async (storageKey: string, value: string) => {
-      await AsyncStorage.setItem(storageKey, value);
-      if (!workspaceId || workspaceId !== remoteWorkspaceId.current) return;
+      if (!workspaceId || workspaceId !== remoteWorkspaceId.current) {
+        await AsyncStorage.setItem(storageKey, value);
+        return;
+      }
       const last = lastRemoteSave.current;
       if (last?.workspaceId === workspaceId && last.key === storageKey && last.value === value) return;
-      const revision = await saveRemoteWorkspaceState(
-        workspaceId,
-        remoteWorkspaceRevision.current,
-        JSON.parse(value) as StoredAppData,
-      );
+      const syncKey = workspaceSyncKey(storageKey);
+      const revisionBeforeSave = remoteWorkspaceRevision.current;
+      await AsyncStorage.multiSet([
+        [syncKey, JSON.stringify({ workspaceId, revision: revisionBeforeSave, pending: true })],
+        [storageKey, value],
+      ]);
+      let revision: number;
+      try {
+        revision = await saveRemoteWorkspaceState(workspaceId, revisionBeforeSave, JSON.parse(value) as StoredAppData);
+      } catch (error) {
+        if (generation === saveGeneration.current) {
+          setPersistenceError(workspaceErrorMessage(error).includes("Workspace changed on another device")
+            ? "Both devices have changes. Your edits are kept here. Export a backup before choosing which version to keep."
+            : "Saved on this device. Cloud sync is pending.");
+        }
+        throw error;
+      }
       if (remoteWorkspaceId.current === workspaceId) {
         remoteWorkspaceRevision.current = revision;
+        await AsyncStorage.setItem(syncKey, JSON.stringify({ workspaceId, revision, pending: false }));
         lastRemoteSave.current = { workspaceId, key: storageKey, value };
       }
     };
@@ -6074,14 +6186,16 @@ function BlushBodiesApp() {
       updateStatus: (status) => {
         setSaveStatus(status);
         if (status === "saved") setPersistenceError("");
-        if (status === "error")
-          setPersistenceError(
-            "Your latest changes could not be saved. Keep the app open and try again.",
-          );
+        if (status === "error") setPersistenceError((current) =>
+          current || "Saving failed. Keep the app open and try again.");
       },
     });
     saveChain.current = chain;
     return task;
+  };
+  const retryWorkspaceSync = () => {
+    if (latestStoredData.current)
+      void queueWorkspaceSave(latestStoredData.current).catch(() => undefined);
   };
   useEffect(() => {
     if (!signedIn || accountDeletionInProgress.current) return;
@@ -6089,16 +6203,17 @@ function BlushBodiesApp() {
     latestStoredData.current = stored;
     if (workspaceSaveTimer.current) clearTimeout(workspaceSaveTimer.current);
     if (remoteWorkspaceHydrated.current) {
-      remoteWorkspaceHydrated.current = false;
+      const hydrationStatus = remoteWorkspaceHydrated.current;
+      remoteWorkspaceHydrated.current = null;
       workspaceSaveTimer.current = null;
       const workspaceId = remoteWorkspaceId.current;
-      lastRemoteSave.current = workspaceId ? {
+      lastRemoteSave.current = workspaceId && hydrationStatus === "saved" ? {
         workspaceId,
         key: userStorageKey(stored.account),
         value: JSON.stringify(stored),
       } : null;
-      setSaveStatus("saved");
-      setPersistenceError("");
+      setSaveStatus(hydrationStatus);
+      if (hydrationStatus === "saved") setPersistenceError("");
       return;
     }
     setSaveStatus("saving");
@@ -6125,10 +6240,6 @@ function BlushBodiesApp() {
     instructorPreferences,
     activeTeachingSession,
   ]);
-  useEffect(() => {
-    if (!persistenceError) return;
-    showAlert("Changes not saved", persistenceError);
-  }, [persistenceError, showAlert]);
   useEffect(() => {
     if (Platform.OS === "web") return;
     const subscription = AppState.addEventListener("change", (nextState) => {
@@ -6225,7 +6336,7 @@ function BlushBodiesApp() {
       return;
     }
     setAssignmentSlotId(undefined);
-    openNewDraft({ ...draft, version: source.version + 1 });
+    openNewDraft({ ...draft, sourcePlanId: source.id, version: source.version + 1 });
   };
   const persistPlan = () => {
     setSequenceHistory([]);
@@ -6274,7 +6385,7 @@ function BlushBodiesApp() {
       const conflict = schedule.find((slot) => {
         if (slot.status === "CANCELLED" || !scheduleSlotsOverlap(proposed, slot)) return false;
         const sameTime = slot.date === proposed.date && slot.time === proposed.time;
-        const canAssign = sameTime && slot.status !== "COMPLETED" && slot.status !== "IN PROGRESS" &&
+        const canAssign = sameTime && !isFinishedClass(slot) && slot.status !== "IN PROGRESS" &&
           (slot.id === assignmentSlotId || !slot.planId || slot.planId === plan.id);
         return !canAssign;
       });
@@ -6423,7 +6534,9 @@ function BlushBodiesApp() {
     const selectedPlan =
       savedPlans.find((saved) => saved.id === planId) ??
       (plan.id === planId && plan.status === "saved" ? plan : undefined);
-    if (!selectedPlan || !classReadiness(selectedPlan, libraryMovements).ready) return;
+    if (!targetSlot || isFinishedClass(targetSlot) || targetSlot.status === "CANCELLED" ||
+        targetSlot.status === "IN PROGRESS" || !selectedPlan ||
+        planLevel(selectedPlan) !== targetSlot.level || !classReadiness(selectedPlan, libraryMovements).ready) return;
     setSequenceHistory([]);
     setSequenceNotice("");
     setSchedule((current) =>
@@ -6434,10 +6547,15 @@ function BlushBodiesApp() {
     setAssignmentSlotId(undefined);
     select("home");
   };
-  const schedulePlanAt = () => {
+  const schedulePlanAt = (proposed?: { date: string; time: string }) => {
     if (plan.status !== "saved" || !classReadiness(plan, libraryMovements).ready)
       return;
-    const { date, time } = nextAvailableClassSlot(schedule, new Date());
+    const { date, time } = proposed ?? nextAvailableClassSlot(schedule, new Date());
+    if (!isFutureScheduleSlot({ date, time }, new Date()) ||
+        schedule.some((slot) => slot.status !== "CANCELLED" && scheduleSlotsOverlap({ date, time }, slot))) {
+      showAlert("Class time unavailable", "Choose a future time that leaves 45 minutes for this class.");
+      return;
+    }
     const slot: ScheduledClass = {
       id: `slot-${date}-${time.replace(":", "")}-${Date.now()}`,
       date,
@@ -6455,6 +6573,11 @@ function BlushBodiesApp() {
   const findPlan = (planId?: string) =>
     savedPlans.find((saved) => saved.id === planId) ??
     (planId === plan.id && plan.status === "saved" ? plan : undefined);
+  const playablePlan = (slot: ScheduledClass) => {
+    const assigned = findPlan(slot.planId);
+    if (assigned && planLevel(assigned) === slot.level && classReadiness(assigned, libraryMovements).ready)
+      return assigned;
+  };
   const openActiveTeachingSession = () => {
     if (!activeTeachingSession) return;
     setSequenceHistory([]);
@@ -6485,8 +6608,9 @@ function BlushBodiesApp() {
   };
   const beginTeachingSession = (
     selectedPlan: ClassPlan,
-    scheduledClassId?: string,
+    context: { booking: ScheduledClass } | { practice: true },
   ) => {
+    const scheduledClassId = "booking" in context ? context.booking.id : undefined;
     if (activeTeachingSession) {
       showAlert(
         "Class already in progress",
@@ -6514,6 +6638,7 @@ function BlushBodiesApp() {
     const active: ActiveTeachingSession = {
       plan: selectedPlan,
       scheduledClassId,
+      practice: "practice" in context || undefined,
       startedAt,
       movementIndex: 0,
       remainingSeconds: ordered[0].duration,
@@ -6534,6 +6659,7 @@ function BlushBodiesApp() {
     setScreen("teach");
   };
   const startScheduledClass = (slot: ScheduledClass) => {
+    if (isFinishedClass(slot) || slot.status === "CANCELLED") return;
     if (activeTeachingSession?.scheduledClassId === slot.id) {
       openActiveTeachingSession();
       return;
@@ -6541,6 +6667,7 @@ function BlushBodiesApp() {
     const assignedPlan = findPlan(slot.planId);
     if (!assignedPlan || planLevel(assignedPlan) !== slot.level) {
       setAssignmentSlotId(slot.id);
+      setSchedulePlanReturn("home");
       setScreen("assign");
       return;
     }
@@ -6553,7 +6680,17 @@ function BlushBodiesApp() {
       setScreen("generated");
       return;
     }
-    beginTeachingSession(assignedPlan, slot.id);
+    if (isFutureScheduleSlot(slot, new Date())) {
+      confirmAction({
+        title: "Start this booking early?",
+        message: `This class is scheduled for ${classDateLabel(slot.date, true)} at ${slot.time}.`,
+        confirmText: "Start Scheduled Class",
+        cancelText: "Keep Booking",
+        onConfirm: () => beginTeachingSession(assignedPlan, { booking: slot }),
+      });
+      return;
+    }
+    beginTeachingSession(assignedPlan, { booking: slot });
   };
   const toggleFavourite = useCallback((id: string) =>
     setFavourites((current) =>
@@ -6586,11 +6723,23 @@ function BlushBodiesApp() {
     setSequenceNotice("Last sequence change undone.");
   };
   const addMovementToPlan = (movement: LibraryMovement, phase: Phase, side: SideSelection = "both") => {
-    if (movement.reviewStatus === "needs-review") return;
-    const movements = insertMovement(plan, movement, phase, `${movement.id}-${Crypto.randomUUID()}`, side);
+    const issue = movementCompatibility(plan, movement, phase)[0];
+    if (issue) {
+      showAlert("Movement unavailable", `${movement.name}: ${issue}`);
+      return;
+    }
+    let movements = insertMovement(plan, movement, phase, `${movement.id}-${Crypto.randomUUID()}`, side);
     if (movements === plan.movements) {
       showAlert("Movement already added", `${movement.name} is already in this class.`);
       return;
+    }
+    if (phaseRemaining({ ...plan, movements }, phase) < 0) {
+      const fitted = fitPhaseTiming(movements, phase);
+      if (fitted === movements) {
+        showAlert("Phase is full", "Replace or remove a movement before adding this one.");
+        return;
+      }
+      movements = fitted;
     }
     changeSequence(movements, undefined, () => {
       setSequenceNotice(`${movement.name} added to ${phase.toLowerCase()}.`);
@@ -6810,6 +6959,9 @@ function BlushBodiesApp() {
     setSequenceHistory([]);
     setSequenceNotice("");
     setLibraryPlanPhase(undefined);
+    setLibraryQuery("");
+    setLibraryFilter("All");
+    libraryScrollOffset.current = 0;
     setHomeDate(localDateKey());
     const raw = await AsyncStorage.getItem(userStorageKey(owner));
     if (!raw) {
@@ -6827,10 +6979,7 @@ function BlushBodiesApp() {
       setSelectedSession(null);
       setSessionHistory(stored.sessionHistory ?? []);
       setSchedule(
-        (stored.schedule ?? initialSchedule).map((slot) => ({
-          ...slot,
-          date: slot.date ?? localDateKey(),
-        })),
+        (stored.schedule ?? initialSchedule).map((slot) => ({ ...slot, date: slot.date ?? localDateKey() })),
       );
       const removedMovementIds = stored.deletedMovementIds ?? [];
       const retainedDeletedItems = pruneRecentlyDeleted(
@@ -6895,38 +7044,53 @@ function BlushBodiesApp() {
       email: user.email.toLowerCase(),
       role: "instructor",
     };
-    const workspaces = await listRemoteWorkspaces();
-    const workspace = workspaces[0];
-    if (!workspace)
-      throw new Error(
-        "No Supabase workspace was found. Apply the database migration and try again.",
-      );
-    const remote = await loadRemoteWorkspaceState<Partial<StoredAppData>>(
-      workspace.id,
-    );
-    remoteWorkspaceId.current = workspace.id;
-    remoteWorkspaceRevision.current = remote.revision;
-    const remoteHasData =
-      remote.data &&
-      typeof remote.data === "object" &&
-      "account" in remote.data &&
-      "plan" in remote.data;
     const key = userStorageKey(owner);
-    if (remoteHasData) {
-      await AsyncStorage.setItem(key, JSON.stringify(remote.data));
-    } else {
-      const local = await AsyncStorage.getItem(key);
-      const initial = local
-        ? (JSON.parse(local) as StoredAppData)
-        : freshWorkspaceData(owner);
-      await AsyncStorage.setItem(key, JSON.stringify(initial));
-      remoteWorkspaceRevision.current = await saveRemoteWorkspaceState(
-        workspace.id,
-        remote.revision,
-        initial,
-      );
+    const syncKey = workspaceSyncKey(key);
+    const [local, syncValue] = await Promise.all([
+      AsyncStorage.getItem(key),
+      AsyncStorage.getItem(syncKey),
+    ]);
+    const cached = readWorkspaceSync(syncValue);
+    remoteWorkspaceHydrated.current = "saved";
+    try {
+      const [workspace] = await listRemoteWorkspaces();
+      if (!workspace) throw new Error("Your account does not have an available workspace.");
+      const remote = await loadRemoteWorkspaceState<Partial<StoredAppData>>(workspace.id);
+      remoteWorkspaceId.current = workspace.id;
+      remoteWorkspaceRevision.current = remote.revision;
+      if (local && cached?.workspaceId === workspace.id && cached.pending) {
+        remoteWorkspaceRevision.current = cached.revision;
+        remoteWorkspaceHydrated.current = "error";
+        setPersistenceError(remote.revision === cached.revision
+          ? "Your local edits were recovered. Cloud sync is pending."
+          : "There's a newer cloud version. Your local edits are still here, and you can export a backup.");
+      } else {
+        if (local && cached?.pending) {
+          await AsyncStorage.setItem(
+            `${WORKSPACE_RECOVERY_PREFIX}${owner.role}/${owner.email}/${Date.now()}`, local,
+          );
+        }
+        const remoteHasData = remote.data?.account && remote.data?.plan;
+        const initial = remoteHasData ? remote.data
+          : local && !cached ? JSON.parse(local) as StoredAppData : freshWorkspaceData(owner);
+        await AsyncStorage.multiSet([
+          [key, JSON.stringify(initial)],
+          [syncKey, JSON.stringify({ workspaceId: workspace.id, revision: remote.revision, pending: !remoteHasData })],
+        ]);
+        if (!remoteHasData) {
+          const revision = await saveRemoteWorkspaceState(workspace.id, remote.revision, initial);
+          remoteWorkspaceRevision.current = revision;
+          await AsyncStorage.setItem(syncKey, JSON.stringify({ workspaceId: workspace.id, revision, pending: false }));
+        }
+      }
+    } catch (error) {
+      const offline = /fetch|network|timeout|temporarily unavailable|timed out/i.test(workspaceErrorMessage(error));
+      if (!offline || !cached || !local) throw error;
+      remoteWorkspaceId.current = cached.workspaceId;
+      remoteWorkspaceRevision.current = cached.revision;
+      remoteWorkspaceHydrated.current = "error";
+      setPersistenceError("You're viewing this device's saved copy. Reconnect to sync changes.");
     }
-    remoteWorkspaceHydrated.current = true;
     await loadWorkspace(owner);
     setSignInNotice(undefined);
     setSignedIn(true);
@@ -6936,7 +7100,8 @@ function BlushBodiesApp() {
   const showUnavailableAuthLink = () => {
     setSignInNotice({
       title: "Email link unavailable",
-      message: "This email link has expired or is invalid. Use Forgot password to request a new reset link.",
+      message: "This email link has expired or is invalid. To confirm signup, enter your email and resend verification. For a new reset link, use Forgot password.",
+      verification: true,
     });
     setScreen("signin");
   };
@@ -6982,7 +7147,7 @@ function BlushBodiesApp() {
       if (event !== "SIGNED_OUT") return;
       remoteWorkspaceId.current = null;
       remoteWorkspaceRevision.current = 0;
-      remoteWorkspaceHydrated.current = false;
+      remoteWorkspaceHydrated.current = null;
       lastRemoteSave.current = null;
       setSignInNotice(undefined);
       setSignedIn(false);
@@ -7114,6 +7279,7 @@ function BlushBodiesApp() {
             title: "Confirm your email",
             message: "Open the verification email from Blush Bodies to finish signing up, then sign in.",
             email: newAccount.email,
+            verification: true,
           });
           setScreen("signin");
           return null;
@@ -7426,22 +7592,24 @@ function BlushBodiesApp() {
   };
   const exportWorkspaceBackup = async () => {
     try {
+      if (Platform.OS !== "web") {
+        if (!FileSystem.cacheDirectory) throw new Error("Backup file storage is unavailable.");
+        if (!(await Sharing.isAvailableAsync())) throw new Error("File sharing is unavailable on this device.");
+      }
+      const workspace = await backupWorkspaceData(latestStoredData.current ?? storedData());
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const name = `blush-bodies-backup-${timestamp}.json`;
+      const contents = JSON.stringify(createWorkspaceBackupEnvelope(workspace), null, 2);
+      if (Platform.OS === "web") {
+        downloadWorkspaceBackup(name, contents);
+        return;
+      }
       if (!FileSystem.cacheDirectory)
         throw new Error("Backup file storage is unavailable.");
-      if (!(await Sharing.isAvailableAsync()))
-        throw new Error("File sharing is unavailable on this device.");
-      const workspace = await backupWorkspaceData(
-        latestStoredData.current ?? storedData(),
-      );
-      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const path = `${FileSystem.cacheDirectory}blush-bodies-backup-${timestamp}.json`;
+      const path = `${FileSystem.cacheDirectory}${name}`;
       await FileSystem.writeAsStringAsync(
         path,
-        JSON.stringify(
-          createWorkspaceBackupEnvelope(workspace),
-          null,
-          2,
-        ),
+        contents,
         { encoding: FileSystem.EncodingType.UTF8 },
       );
       await Sharing.shareAsync(path, {
@@ -7468,16 +7636,16 @@ function BlushBodiesApp() {
       if (selection.canceled) return;
       const asset = selection.assets[0];
       if (!asset) throw new Error("No backup file was selected.");
+      const contents = Platform.OS === "web"
+        ? await (asset.file ? asset.file.text() : fetch(asset.uri).then((response) => response.text()))
+        : await FileSystem.readAsStringAsync(asset.uri, { encoding: FileSystem.EncodingType.UTF8 });
       const workspace = parseWorkspaceBackup<WorkspaceBackupData>(
-        await FileSystem.readAsStringAsync(asset.uri, {
-          encoding: FileSystem.EncodingType.UTF8,
-        }),
+        contents,
         account,
       );
       confirmAction({
         title: "Restore this backup?",
-        message:
-          "Current plans, classes, sessions and library changes on this device will be replaced.",
+        message: `This file contains ${workspace.savedPlans.length} saved plans, ${workspace.schedule.length} bookings and ${workspace.sessionHistory.length} sessions. It will replace your current ${supabaseConfigured ? "synced" : "local"} workspace.`,
         confirmText: "Restore backup",
         destructive: true,
         onConfirm: () => {
@@ -7495,7 +7663,7 @@ function BlushBodiesApp() {
                 JSON.stringify(restored),
               );
               await loadWorkspace(account);
-              showAlert("Backup restored", "Your workspace is ready to use.", undefined, Check);
+              showAlert("Backup restored", "Your backup was opened on this device.", undefined, Check);
             } catch {
               if (previousWorkspace === null)
                 await AsyncStorage.removeItem(key).catch(() => undefined);
@@ -7526,7 +7694,7 @@ function BlushBodiesApp() {
     latestStoredData.current = null;
     remoteWorkspaceId.current = null;
     remoteWorkspaceRevision.current = 0;
-    remoteWorkspaceHydrated.current = false;
+    remoteWorkspaceHydrated.current = null;
     lastRemoteSave.current = null;
     signInAttempts.delete(signInAttemptKey(account.role, account.email));
     setSignedIn(false);
@@ -7558,6 +7726,7 @@ function BlushBodiesApp() {
         const keys = await AsyncStorage.getAllKeys();
         await AsyncStorage.multiRemove([
           key,
+          workspaceSyncKey(key),
           legacyWalkthroughStorageKey(account),
           ...keys.filter((item) => item.startsWith(recoveryPrefix)),
         ]);
@@ -7583,7 +7752,12 @@ function BlushBodiesApp() {
   const resetAppData = async () => {
     try {
       await saveChain.current;
-      await AsyncStorage.multiRemove([userStorageKey(account), legacyWalkthroughStorageKey(account)]);
+      const key = userStorageKey(account);
+      if (readWorkspaceSync(await AsyncStorage.getItem(workspaceSyncKey(key)))?.pending) {
+        showAlert("Sync pending", "Your edits are still on this device. Sync or export a backup before clearing the cache.");
+        return;
+      }
+      await AsyncStorage.multiRemove([key, workspaceSyncKey(key), legacyWalkthroughStorageKey(account)]);
       if (supabaseConfigured) {
         const { error } = await requireSupabase().auth.signOut();
         if (error) throw error;
@@ -7606,6 +7780,37 @@ function BlushBodiesApp() {
     }
   };
   const recentlyDeletedCount = pruneRecentlyDeleted(recentlyDeleted).length;
+  const renderLibrary = () => (
+    <Library
+      back={libraryPlanPhase ? () => {
+        setLibraryPlanPhase(undefined);
+        setScreen("editor");
+      } : undefined}
+      movements={libraryMovements}
+      favourites={favourites}
+      planningPhase={libraryPlanPhase}
+      planningPlan={plan}
+      query={libraryQuery}
+      setQuery={setLibraryQuery}
+      filter={libraryFilter}
+      setFilter={setLibraryFilter}
+      scrollOffset={libraryScrollOffset}
+      notice={libraryNotice}
+      open={openLibraryMovement}
+      create={() => {
+        setLibraryNotice("");
+        setMovementToReview(undefined);
+        setScreen("customMovement");
+      }}
+      toggle={toggleFavourite}
+      deletedCount={recentlyDeletedCount}
+      openDeleted={() => {
+        setRecentlyDeletedReturn("library");
+        setRecentlyDeletedNotice("");
+        setScreen("recentlyDeleted");
+      }}
+    />
+  );
   if (!authReady)
     return (
       <View style={[s.flex, s.authLoading]}>
@@ -7630,6 +7835,19 @@ function BlushBodiesApp() {
       <SignIn
         role="instructor"
         notice={signInNotice}
+        resendVerification={async (email) => {
+          if (!/^\S+@\S+\.\S+$/.test(email)) return "Enter your account email first.";
+          try {
+            const { error } = await requireSupabase().auth.resend({
+              type: "signup", email, options: { emailRedirectTo: currentAuthRedirectUrl() },
+            });
+            if (error) return "The verification email could not be requested. Please try again shortly.";
+            showAlert("Check your email", "If verification is pending, check your inbox and junk folder for a new link.");
+            return null;
+          } catch {
+            return "The verification service is unavailable. Please try again.";
+          }
+        }}
         allowSandboxReset={ALLOW_SANDBOX_PASSWORD_RESET && !supabaseConfigured}
         openDemo={
           ALLOW_SANDBOX_PASSWORD_RESET && !supabaseConfigured
@@ -7709,7 +7927,7 @@ function BlushBodiesApp() {
       <TeachingSession
         session={activeTeachingSession}
         preferences={instructorPreferences}
-        exit={() => setScreen("generated")}
+        exit={() => select("home")}
         checkpoint={setActiveTeachingSession}
         finish={(result) => {
           setActiveTeachingSession(undefined);
@@ -7719,7 +7937,7 @@ function BlushBodiesApp() {
             );
           }
           setSessionResult(result);
-          setSessionHistory((current) => [
+          if (!result.practice) setSessionHistory((current) => [
             result,
             ...current.filter((session) => session.startedAt !== result.startedAt),
           ]);
@@ -7736,8 +7954,8 @@ function BlushBodiesApp() {
           result={sessionResult}
           done={(notes) => {
             const completed = { ...sessionResult, notes };
-            setSessionResult(completed);
-            setSessionHistory((current) => [
+          setSessionResult(completed.practice ? null : completed);
+            if (!completed.practice) setSessionHistory((current) => [
               completed,
               ...current.filter(
                 (session) => session.startedAt !== completed.startedAt,
@@ -7754,11 +7972,18 @@ function BlushBodiesApp() {
         <StatusBar style="dark" />
         <TopSafeArea />
         <SessionDetails
+          key={selectedSession.startedAt}
           result={selectedSession}
           scheduledClass={schedule.find(
             (slot) => slot.id === selectedSession.scheduledClassId,
           )}
           back={() => setScreen(sessionDetailsReturn)}
+          saveNotes={(notes) => {
+            const updated = { ...selectedSession, notes };
+            setSelectedSession(updated);
+            setSessionHistory((current) => current.map((session) =>
+              session.startedAt === updated.startedAt ? updated : session));
+          }}
         />
       </View>
     );
@@ -7775,16 +8000,11 @@ function BlushBodiesApp() {
           targetSlotId={assignmentSlotId}
           back={() => {
             setAssignmentSlotId(undefined);
-            setScreen(assignmentSlotId ? "home" : schedulePlanReturn);
+            setScreen(schedulePlanReturn);
           }}
           create={() => openClassCreator("assign")}
           assign={assignPlan}
           scheduleNext={schedulePlanAt}
-          openSchedule={() => {
-            setScheduleReturnScreen("assign");
-            setScheduleEditId(undefined);
-            setScreen("schedule");
-          }}
         />
       </View>
     );
@@ -7794,7 +8014,8 @@ function BlushBodiesApp() {
         <StatusBar style="dark" />
         <TopSafeArea />
         <ScheduleManager
-          schedule={schedule}
+          schedule={displaySchedule.map((slot) => slot.status === "READY" && !playablePlan(slot)
+            ? { ...slot, status: "NEEDS PLAN" } : slot)}
           initialEditId={scheduleEditId}
           back={() => {
             const destination = scheduleEditId ? "home" : scheduleReturnScreen;
@@ -7806,7 +8027,6 @@ function BlushBodiesApp() {
             saveScheduledClass(slot);
             setScheduleEditId(undefined);
             if (returnHome) setScreen("home");
-            else if (scheduleReturnScreen === "assign") setScreen("assign");
           }}
           remove={removeScheduledClass}
           cancel={cancelScheduledClass}
@@ -7899,10 +8119,18 @@ function BlushBodiesApp() {
     <View style={s.app}>
       <StatusBar style="dark" />
       <TopSafeArea />
+      {saveStatus === "error" && persistenceError ? (
+        <View style={s.syncNotice} accessibilityLiveRegion="polite">
+          <Text style={[s.sub, s.flex]}>{persistenceError}</Text>
+          <Pressable onPress={retryWorkspaceSync} accessibilityRole="button" style={s.syncRetry}>
+            <Text style={s.link}>Retry sync</Text>
+          </Pressable>
+        </View>
+      ) : null}
       <View style={s.flex}>
         {screen === "home" ? (
           <InstructorHome
-            schedule={schedule}
+            schedule={displaySchedule}
             account={account}
             selectedDate={homeDate}
             setSelectedDate={setHomeDate}
@@ -7910,11 +8138,18 @@ function BlushBodiesApp() {
             create={() => openClassCreator("home")}
             assign={(slot) => {
               setAssignmentSlotId(slot.id);
+              setSchedulePlanReturn("home");
               setScreen("assign");
             }}
             start={startScheduledClass}
             resume={openActiveTeachingSession}
             review={reviewScheduledClass}
+            openSchedule={() => {
+              setScheduleReturnScreen("home");
+              setScheduleEditId(undefined);
+              setScreen("schedule");
+            }}
+            openProfile={() => select("profile")}
             modify={(slot) => {
               setScheduleReturnScreen("home");
               setScheduleEditId(slot.id);
@@ -7930,18 +8165,12 @@ function BlushBodiesApp() {
                 onConfirm: () => cancelScheduledClass(slot),
               })
             }
-            getPlanTitle={(slot) => {
-              const assignedPlan = findPlan(slot.planId);
-              return assignedPlan &&
-                classReadiness(assignedPlan, libraryMovements).ready &&
-                planLevel(assignedPlan) === slot.level
-                ? assignedPlan.brief.program
-                : undefined;
-            }}
+            getPlanTitle={(slot) => playablePlan(slot)?.brief.program}
           />
         ) : null}
         {screen === "create" ? (
           <Create
+            library={libraryMovements}
             initialClass={schedule.find(
               (slot) => slot.id === assignmentSlotId,
             )}
@@ -7973,12 +8202,12 @@ function BlushBodiesApp() {
             }}
             rebuild={() => rebuildPlan(plan)}
             save={savePlan}
-            schedulePlan={() => {
-              setAssignmentSlotId(undefined);
+            schedulePlan={(slotId) => {
+              setAssignmentSlotId(slotId);
               setSchedulePlanReturn("generated");
               setScreen("assign");
             }}
-            teach={(slotId) => beginTeachingSession(plan, slotId)}
+            teach={() => beginTeachingSession(plan, { practice: true })}
           />
         ) : null}
         {screen === "classes" ? (
@@ -8014,7 +8243,33 @@ function BlushBodiesApp() {
           />
         ) : null}
         {screen === "editor" ? (
+          <View style={showPlansPane ? s.desktopPanes : s.flex}>
+          {showPlansPane ? (
+            <ScrollView style={s.desktopPlanPane} contentContainerStyle={s.desktopPlanList}>
+              <Text style={s.headerTitle}>Plans</Text>
+              {[...(draftPlan ? [draftPlan] : []), ...savedPlans].map((candidate) => (
+                <Pressable key={candidate.id} accessibilityRole="button"
+                  accessibilityState={{ selected: plan.id === candidate.id }}
+                  onPress={() => {
+                    if (plan.id === candidate.id) return;
+                    setPlan(candidate);
+                    setEditorPhase("All");
+                    setAssignmentSlotId(undefined);
+                    setSequenceHistory([]);
+                    setSequenceNotice("");
+                  }}
+                  style={[s.savedPlan, plan.id === candidate.id && s.assignmentSelected]}>
+                  <View style={s.flex}>
+                    <Text style={s.moveTitle}>{candidate.brief.program}</Text>
+                    <Text style={s.sub}>{candidate.brief.week} / {candidate.brief.day} / {candidate.status === "draft" ? "Draft" : `v${candidate.version}`}</Text>
+                  </View>
+                  <ChevronRight size={18} color={C.rose} />
+                </Pressable>
+              ))}
+            </ScrollView>
+          ) : null}
           <Classes
+            key={plan.id}
             plan={plan}
             change={changeSequence}
             library={libraryMovements}
@@ -8037,12 +8292,18 @@ function BlushBodiesApp() {
               brief: { ...plan.brief, scheduledDate: slot?.date, scheduledTime: slot?.time },
             })}
             open={(phase) => {
+              setLibraryQuery("");
+              setLibraryFilter("All");
+              libraryScrollOffset.current = 0;
               setLibraryPlanPhase(phase);
               setScreen("library");
             }}
           />
+          </View>
         ) : null}
         {screen === "details" ? (
+          <View style={showLibraryPane ? s.desktopPanes : s.flex}>
+          {showLibraryPane ? <View style={s.desktopLibraryPane}>{renderLibrary()}</View> : null}
           <Details
             key={selectedMovement.id}
             movement={selectedMovement}
@@ -8059,6 +8320,7 @@ function BlushBodiesApp() {
             }}
             remove={() => deleteLibraryMovement(selectedMovement)}
           />
+          </View>
         ) : null}
         {screen === "customMovement" ? (
           <CustomMovement
@@ -8069,34 +8331,12 @@ function BlushBodiesApp() {
             save={saveCustomMovement}
           />
         ) : null}
-        {screen === "library" ? (
-          <Library
-            back={libraryPlanPhase ? () => {
-              setLibraryPlanPhase(undefined);
-              setScreen("editor");
-            } : undefined}
-            movements={libraryMovements}
-            favourites={favourites}
-            notice={libraryNotice}
-            open={openLibraryMovement}
-            create={() => {
-              setLibraryNotice("");
-              setMovementToReview(undefined);
-              setScreen("customMovement");
-            }}
-            toggle={toggleFavourite}
-            deletedCount={recentlyDeletedCount}
-            openDeleted={() => {
-              setRecentlyDeletedReturn("library");
-              setRecentlyDeletedNotice("");
-              setScreen("recentlyDeleted");
-            }}
-          />
-        ) : null}
+        {screen === "library" ? renderLibrary() : null}
         {screen === "insights" ? (
           <Insights
             sessions={sessionHistory}
             schedule={schedule}
+            readyForSlot={(slot) => Boolean(playablePlan(slot))}
             openSession={(session) => openSessionDetails(session, "insights")}
           />
         ) : null}
@@ -8178,13 +8418,16 @@ const s = StyleSheet.create({
     flex: 1,
     width: "100%",
     minWidth: 0,
-    maxWidth: Platform.OS === "web" ? 480 : undefined,
     backgroundColor: C.bg,
     overflow: "hidden",
   },
   app: { flex: 1, minWidth: 0, backgroundColor: C.bg },
   flex: { flex: 1, minWidth: 0 },
   page: { paddingHorizontal: 24, paddingBottom: 28, gap: 20 },
+  desktopPanes: { flex: 1, flexDirection: "row", minWidth: 0 },
+  desktopLibraryPane: { width: 400, minHeight: 0, borderRightWidth: 1, borderRightColor: C.line },
+  desktopPlanPane: { width: 290, flexGrow: 0, flexShrink: 0, borderRightWidth: 1, borderRightColor: C.line },
+  desktopPlanList: { padding: 20, gap: 12 },
   row: {
     minWidth: 0,
     flexDirection: "row",
@@ -8192,14 +8435,18 @@ const s = StyleSheet.create({
     justifyContent: "space-between",
   },
   stack: { gap: 10 },
+  syncNotice: { paddingHorizontal: 20, paddingVertical: 8, flexDirection: "row", gap: 12, alignItems: "center", backgroundColor: "#F4E3E3" },
+  syncRetry: { paddingVertical: 8, paddingHorizontal: 4 },
   welcome: {
-    flex: 1,
+    flexGrow: 1,
     backgroundColor: C.bg,
     padding: 24,
     paddingTop: 66,
     paddingBottom: 84,
     justifyContent: "space-between",
+    gap: 20,
   },
+  welcomeCompact: { paddingTop: 24, paddingBottom: 24, gap: 16 },
   brand: { alignItems: "center", gap: 10 },
   brandTitle: { color: C.rose, fontSize: 14, fontWeight: "800" },
   authLoading: { alignItems: "center", justifyContent: "center", gap: 10 },
@@ -8213,6 +8460,10 @@ const s = StyleSheet.create({
     overflow: "hidden",
   },
   artDark: { backgroundColor: "#594B4F", height: 145, borderRadius: 20 },
+  artCompact: { height: 132 },
+  artDiskCompact: { top: 15, width: 100, height: 100 },
+  artHeadCompact: { top: 15, width: 37, height: 37 },
+  artBodyCompact: { top: 63, width: 105, height: 55 },
   artDisk: {
     position: "absolute",
     width: 116,
@@ -8247,6 +8498,7 @@ const s = StyleSheet.create({
     fontWeight: "800",
   },
   sub: { color: C.muted, fontSize: 12, lineHeight: 18, marginTop: 3 },
+  heroCompact: { fontSize: 27, lineHeight: 31 },
   welcomeActions: { gap: 12 },
   main: {
     height: 49,
@@ -8916,7 +9168,6 @@ const s = StyleSheet.create({
     gap: 10,
     paddingVertical: 10,
   },
-  editorTools: { flexDirection: "row", alignItems: "center", gap: 13 },
   moveNum: {
     width: 39,
     height: 39,
@@ -9208,30 +9459,6 @@ const s = StyleSheet.create({
     justifyContent: "space-between",
     gap: 10,
   },
-  movementCardCount: {
-    color: C.muted,
-    fontSize: 10,
-    fontWeight: "500",
-  },
-  movementProgressRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginTop: 14,
-  },
-  movementProgressValue: { color: C.sage, fontSize: 10, fontWeight: "600" },
-  movementProgressTrack: {
-    height: 3,
-    borderRadius: 2,
-    backgroundColor: "#F0E7E5",
-    overflow: "hidden",
-    marginTop: 5,
-  },
-  movementProgressFill: {
-    height: "100%",
-    borderRadius: 2,
-    backgroundColor: C.sage,
-  },
   movementArtwork: {
     width: "100%",
     flex: 1,
@@ -9366,7 +9593,7 @@ const s = StyleSheet.create({
     marginTop: 4,
   },
   endClassText: { fontSize: 11 },
-  endClassVeryCompact: { height: 26, marginTop: 2 },
+  endClassVeryCompact: { height: 40, marginTop: 2 },
   summaryHero: {
     minHeight: 170,
     backgroundColor: C.card,
@@ -9375,6 +9602,7 @@ const s = StyleSheet.create({
     justifyContent: "center",
     gap: 8,
   },
+  summaryEarly: { backgroundColor: "#F4E3E3" },
   summaryCheck: {
     width: 54,
     height: 54,
@@ -9690,9 +9918,10 @@ const s = StyleSheet.create({
 
 export default function App() {
   const { width } = useWindowDimensions();
+  const [wideLayout, setWideLayout] = useState(false);
   const appWidth =
     Platform.OS === "web"
-      ? Math.min(width, 480)
+      ? Math.min(width, wideLayout ? 980 : 480)
       : width >= 700
         ? Math.min(width, 680)
         : null;
@@ -9706,7 +9935,7 @@ export default function App() {
           ]}
         >
           <AppDialogProvider>
-            <BlushBodiesApp />
+            <BlushBodiesApp setWideLayout={setWideLayout} />
           </AppDialogProvider>
         </View>
       </GestureHandlerRootView>

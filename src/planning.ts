@@ -30,6 +30,7 @@ export type PlanMovement = {
 };
 export type ClassPlan = {
   id: string;
+  sourcePlanId?: string;
   version: number;
   brief: PlanBrief;
   movements: PlanMovement[];
@@ -221,6 +222,7 @@ export const updatePlanSequence = (
 ): ClassPlan => ({
   ...plan,
   id: plan.status === "saved" ? `${plan.id}-v${plan.version + 1}-${timestamp}` : plan.id,
+  ...(plan.status === "saved" ? { sourcePlanId: plan.id } : {}),
   version: plan.version + 1,
   status: "draft",
   sequenceMode: mode,
@@ -417,62 +419,62 @@ export type ReadinessReport = { errors: string[]; warnings: string[]; ready: boo
 const timeLabel = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 const legacyPairedFamilies = new Set(["side-leg-lift", "clamshell", "donkey-kick", "figure-four", "supine-twist"]);
 
-export const classReadiness = (plan: ClassPlan, library: LibraryMovement[] = []): ReadinessReport => {
+export const movementEquipment = (equipment: string) => equipment
+  .split(/[,/&+]/).map((item) => item.trim())
+  .filter((item) => item && !["none", "bodyweight"].includes(item.toLowerCase()));
+
+export const movementCompatibility = (plan: ClassPlan, source: LibraryMovement, phase: Phase) => {
   const errors: string[] = [];
+  if (source.reviewStatus === "needs-review") errors.push("instructor review is still needed.");
+  if (source.phases?.length && !source.phases.includes(phase))
+    errors.push(`${phase.toLowerCase()} is not an approved phase.`);
+  const levels = ["Beginner", "Intermediate", "Advanced"];
+  const required = phase === "Main" ? source.mainLevel ?? source.level : source.level;
+  if (levels.indexOf(required) > levels.indexOf(planLevel(plan)))
+    errors.push(`this version requires ${required === "Beginner" ? "a" : "an"} ${required.toLowerCase()} class.`);
+  const available = new Set(plan.brief.equipment.map((item) => item.trim().toLowerCase()));
+  const missing = movementEquipment(source.equipment).filter((item) => !available.has(item.toLowerCase()));
+  if (missing.length) errors.push(`add ${missing.join(" and ")} to the class equipment.`);
+  return errors;
+};
+
+export const inspectClassReadiness = (plan: ClassPlan, library: LibraryMovement[] = []) => {
+  const issues = new Map<string, { message: string; phase?: Phase; movementId?: string }>();
+  const addIssue = (message: string, phase?: Phase, movementId?: string) => {
+    if (!issues.has(message)) issues.set(message, { message, phase, movementId });
+  };
   const warnings = sequenceWarnings(plan.movements);
   if (warnings.includes("Phases are out of order.")) {
-    errors.push("Put warm-up, main and cool-down in that order.");
+    addIssue("Put warm-up, main and cool-down in that order.");
     warnings.splice(warnings.indexOf("Phases are out of order."), 1);
   }
   for (const phase of PHASES) {
     const moves = plan.movements.filter((move) => move.phase === phase);
-    if (!moves.length) errors.push(`${phase} has no movements.`);
+    if (!moves.length) addIssue(`${phase} has no movements.`, phase);
     else {
       const difference = phaseRemaining(plan, phase);
       if (Number.isFinite(difference) && difference !== 0)
-        errors.push(`${phase} is ${timeLabel(Math.abs(difference))} ${difference > 0 ? "short" : "over target"}.`);
+        addIssue(`${phase} is ${timeLabel(Math.abs(difference))} ${difference > 0 ? "short" : "over target"}.`, phase);
     }
   }
   const balanced = new Map<string, { name: string; phase: Phase; left: number[]; right: number[] }>();
   for (const move of plan.movements) {
-    if (!PHASES.includes(move.phase)) errors.push(`${move.title}: choose a valid phase.`);
+    const flag = (message: string) => addIssue(message, move.phase, move.id);
+    if (!PHASES.includes(move.phase)) flag(`${move.title}: choose a valid phase.`);
     if (!Number.isInteger(move.duration) || move.duration <= 0)
-      errors.push(`${move.title}: duration must be a positive number of seconds.`);
+      flag(`${move.title}: duration must be a positive number of seconds.`);
     if (!move.title.trim() || !move.position.trim() || !move.cue?.trim())
-      errors.push(`${move.title || "Unnamed movement"}: complete the name, position and cue.`);
+      flag(`${move.title || "Unnamed movement"}: complete the name, position and cue.`);
     const family = movementSourceId(move);
     const source = library.find((item) => item.id === family);
-    if (source?.reviewStatus === "needs-review") errors.push(`${source.name}: instructor review is still needed.`);
-    if (source?.phases?.length && !source.phases.includes(move.phase))
-      errors.push(`${source.name}: ${move.phase.toLowerCase()} is not an approved phase.`);
     if (source) {
-      const levels = ["Beginner", "Intermediate", "Advanced"];
-      const required = move.phase === "Main" ? source.mainLevel ?? source.level : source.level;
-      const requiredLevel = levels.indexOf(required);
-      if (requiredLevel >= 0 && requiredLevel > levels.indexOf(planLevel(plan)))
-        errors.push(
-          `${source.name}: this version requires ${required === "Advanced" ? "an" : "a"} ${required.toLowerCase()} class.`,
-        );
-      const availableEquipment = new Set(
-        plan.brief.equipment.map((item) => item.trim().toLowerCase()),
-      );
-      const missingEquipment = source.equipment
-        .split(/[,/&+]/)
-        .map((item) => item.trim())
-        .filter(Boolean)
-        .filter(
-          (item) =>
-            !["none", "bodyweight"].includes(item.toLowerCase()) &&
-            !availableEquipment.has(item.toLowerCase()),
-        );
-      if (missingEquipment.length)
-        errors.push(`${source.name}: add ${missingEquipment.join(" or ")} to the class equipment.`);
+      for (const message of movementCompatibility(plan, source, move.phase)) flag(`${source.name}: ${message}`);
     }
     const side = workingSide(move);
     if (move.requiresPair || source?.sideMode === "paired" || legacyPairedFamilies.has(family) || side === "left" || side === "right") {
       if (side === "alternating") continue;
       if (!side) {
-        errors.push(`${move.title}: choose the working side or alternating sides.`);
+        flag(`${move.title}: choose the working side or alternating sides.`);
         continue;
       }
       const key = `${move.phase}:${family}`;
@@ -482,11 +484,15 @@ export const classReadiness = (plan: ClassPlan, library: LibraryMovement[] = [])
   }
   for (const group of balanced.values()) {
     if (!group.left.length || !group.right.length) {
-      errors.push(`${group.name} (${group.phase}): ${group.left.length ? "right" : "left"} side is missing.`);
+      addIssue(`${group.name} (${group.phase}): ${group.left.length ? "right" : "left"} side is missing.`, group.phase);
     } else if (group.left.length !== group.right.length ||
       group.left.reduce((a, b) => a + b, 0) !== group.right.reduce((a, b) => a + b, 0)) {
-      errors.push(`${group.name} (${group.phase}): left and right sides need matching time and card counts.`);
+      addIssue(`${group.name} (${group.phase}): left and right sides need matching time and card counts.`, group.phase);
     }
   }
-  return { errors: [...new Set(errors)], warnings, ready: errors.length === 0 };
+  const report: ReadinessReport = { errors: [...issues.keys()], warnings, ready: issues.size === 0 };
+  return { report, issues: [...issues.values()] };
 };
+
+export const classReadiness = (plan: ClassPlan, library: LibraryMovement[] = []) =>
+  inspectClassReadiness(plan, library).report;

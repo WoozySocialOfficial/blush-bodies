@@ -18,39 +18,39 @@ type TeachingPosition = {
   savedAt: number;
 };
 
+type MovementPosition = Pick<TeachingPosition, "movementIndex" | "remainingSeconds">;
+
+export const advanceTeachingPosition = (
+  position: MovementPosition,
+  movements: TimedMovement[],
+  elapsedSeconds: number,
+): MovementPosition => {
+  let { movementIndex, remainingSeconds } = position;
+  while (elapsedSeconds >= remainingSeconds) {
+    if (movementIndex === movements.length - 1) return { movementIndex, remainingSeconds: 0 };
+    elapsedSeconds -= remainingSeconds;
+    movementIndex += 1;
+    remainingSeconds = Math.max(1, movements[movementIndex].duration);
+  }
+  return { movementIndex, remainingSeconds: remainingSeconds - elapsedSeconds };
+};
+
 export const recoverTeachingPosition = (
   session: TeachingPosition,
   movements: TimedMovement[],
   now = Date.now(),
 ) => {
   if (!movements.length) return { movementIndex: 0, remainingSeconds: 0 };
-  let movementIndex = Math.max(
+  const movementIndex = Math.max(
     0,
     Math.min(movements.length - 1, Math.floor(session.movementIndex)),
   );
-  let remainingSeconds = Math.max(0, session.remainingSeconds);
-  let elapsedSeconds = session.held
+  const remainingSeconds = Math.max(0, session.remainingSeconds);
+  const elapsedSeconds = session.held
     ? 0
     : Math.max(0, Math.floor((now - session.savedAt) / 1000));
 
-  while (remainingSeconds === 0 && movementIndex < movements.length - 1) {
-    movementIndex += 1;
-    remainingSeconds = Math.max(1, movements[movementIndex].duration);
-  }
-  while (elapsedSeconds > 0) {
-    if (elapsedSeconds < remainingSeconds) {
-      remainingSeconds -= elapsedSeconds;
-      break;
-    }
-    elapsedSeconds -= remainingSeconds;
-    if (movementIndex === movements.length - 1) {
-      remainingSeconds = 0;
-      break;
-    }
-    movementIndex += 1;
-    remainingSeconds = Math.max(1, movements[movementIndex].duration);
-  }
-  return { movementIndex, remainingSeconds };
+  return advanceTeachingPosition({ movementIndex, remainingSeconds }, movements, elapsedSeconds);
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>

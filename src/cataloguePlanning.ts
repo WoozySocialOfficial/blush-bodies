@@ -16,6 +16,9 @@ export const createCataloguePlan = (
     Energising: 2,
     Strong: 2,
   };
+  const week = Number(/^Week (\d+)$/.exec(brief.week)?.[1] ?? 1);
+  const day = Number(/^Day (\d+)$/.exec(brief.day)?.[1] ?? 1);
+  const lesson = Math.max(0, week - 1) * 5 + Math.max(0, day - 1);
   let count = 0;
   // Reserve warm-up and cool-down movements before filling the larger main phase.
   const phases: Phase[] = ["Warm-up", "Cool-down", "Main"];
@@ -25,7 +28,8 @@ export const createCataloguePlan = (
       if (!suggestions.length) break;
       const offset = energyOffset[brief.energy] ?? 0;
       const energyIndex = brief.energy === "Strong" ? count * 2 + 1 : offset + count;
-      const choice = suggestions[energyIndex % suggestions.length].movement;
+      const lessonOffset = Math.floor(lesson / 3 ** (count % 3)) % 3;
+      const choice = suggestions[(energyIndex + lessonOffset) % suggestions.length].movement;
       plan = { ...plan, movements: insertMovement(plan, choice, phase, `${id}-${++count}`) };
     }
     plan = { ...plan, movements: fitPhaseTiming(plan.movements, phase) };
@@ -33,11 +37,9 @@ export const createCataloguePlan = (
   return plan;
 };
 
-export const replaceCatalogueMovement = (
-  plan: ClassPlan, index: number, library: LibraryMovement[], id: string,
-) => {
+const replacementContext = (plan: ClassPlan, index: number, library: LibraryMovement[]) => {
   const current = plan.movements[index];
-  if (!current) return plan.movements;
+  if (!current) return;
   const family = movementSourceId(current);
   const side = workingSide(current);
   const paired = side === "left" || side === "right";
@@ -53,10 +55,23 @@ export const replaceCatalogueMovement = (
   const candidates = library.filter((move) => move.id !== family &&
     move.reviewStatus === "reviewed" && move.cues.length &&
     (move.sideMode === "paired") === paired);
-  const choice = suggestMovements(
+  const choices = suggestMovements(
     { ...plan, movements: remaining, sequenceMode: "auto" }, candidates, current.phase,
     MOVEMENT_DURATION_SECONDS * (paired ? 2 : 1),
-  )[0]?.movement;
+  ).map(({ movement }) => movement);
+  return { choices, replacing, paired };
+};
+
+export const catalogueReplacementChoices = (plan: ClassPlan, index: number, library: LibraryMovement[]) =>
+  replacementContext(plan, index, library)?.choices ?? [];
+
+export const replaceCatalogueMovement = (
+  plan: ClassPlan, index: number, library: LibraryMovement[], id: string, choiceId?: string,
+) => {
+  const context = replacementContext(plan, index, library);
+  if (!context) return plan.movements;
+  const { choices, replacing, paired } = context;
+  const choice = choiceId ? choices.find((movement) => movement.id === choiceId) : choices[0];
   if (!choice) return plan.movements;
   return plan.movements.map((move, i) => {
     if (!replacing(i)) return move;

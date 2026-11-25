@@ -5,10 +5,10 @@ import {
   fillMissingPlanCues, fitPhaseTiming, insertMovement, mergeLibraryCatalog, movementSourceId, nextPlanningPhase,
   orderMovementsByPosition, phaseRemaining, phaseTotal, positionGroup,
   sequenceForTeaching, sequenceWarnings, suggestMovements, updatePlanSequence,
-  classReadiness, planLevel, selectionDuration, sideLabel, syncMovementImage, workingSide, MOVEMENT_DURATION_SECONDS,
+  classReadiness, inspectClassReadiness, movementCompatibility, planLevel, selectionDuration, sideLabel, syncMovementImage, workingSide, MOVEMENT_DURATION_SECONDS,
 } from "../src/planning.ts";
 import { additionalMovements, retiredMovementIds } from "../src/catalogue.ts";
-import { createCataloguePlan, replaceCatalogueMovement } from "../src/cataloguePlanning.ts";
+import { catalogueReplacementChoices, createCataloguePlan, replaceCatalogueMovement } from "../src/cataloguePlanning.ts";
 import {
   assignSchedulePlan, filterSchedule, isFutureScheduleSlot,
   nextAvailableClassSlot, removeScheduleSlot, rescheduleSlot,
@@ -25,7 +25,7 @@ import {
 import {
   countdownCueSecond, isRecoverableTeachingSession, recoverTeachingPosition,
 } from "../src/teaching.ts";
-import { enqueueWorkspaceSave } from "../src/workspacePersistence.ts";
+import { enqueueWorkspaceSave, readWorkspaceSync } from "../src/workspacePersistence.ts";
 import {
   createWorkspaceBackupEnvelope, parseWorkspaceBackup,
   safeBackupImageFileName, WorkspaceBackupError,
@@ -1028,6 +1028,56 @@ test("energy choices produce distinct ready-to-teach sequences", () => {
   assert(generated.every((item) => classReadiness(item, additionalMovements).ready));
 });
 
+test("every scheduled lesson varies the reviewed Mat template without repeats or timing gaps", () => {
+  for (const level of ["Beginner", "Intermediate", "Advanced"]) {
+    for (const energy of ["Calm", "Flowing", "Energising", "Strong"]) {
+      const signatures = new Set();
+      for (let week = 1; week <= 4; week++) {
+        for (let day = 1; day <= 5; day++) {
+          const generated = createCataloguePlan(
+            { ...plan().brief, level, energy, week: `Week ${week}`, day: `Day ${day}` },
+            additionalMovements,
+            "lesson",
+          );
+          assert.deepEqual(classReadiness(generated, additionalMovements), { ready: true, errors: [], warnings: [] });
+          signatures.add(generated.movements.map(({ sourceMovementId, side }) => [sourceMovementId, side]).flat().join(","));
+        }
+      }
+      assert.equal(signatures.size, 20, `${level} ${energy}`);
+    }
+  }
+});
+
+test("the picker and saved plan identify the same incompatible movement and phase", () => {
+  const source = libraryMovement("advanced-band", {
+    level: "Advanced", equipment: "Band", phases: ["Main"], reviewStatus: "reviewed",
+  });
+  const original = plan();
+  const selected = insertMovement(original, source, "Warm-up", "card");
+  const compatibility = movementCompatibility(original, source, "Warm-up");
+  assert.equal(compatibility.length, 3);
+  const { report, issues } = inspectClassReadiness({ ...original, movements: selected }, [source]);
+  assert.equal(report.ready, false);
+  assert.deepEqual(issues.filter(({ movementId }) => movementId === "card"), compatibility.map((message) => ({
+    phase: "Warm-up", movementId: "card", message: `${source.name}: ${message}`,
+  })));
+});
+
+test("workspace sync metadata keeps the revision used by a locally pending save", () => {
+  const pending = { workspaceId: "workspace", revision: 14, pending: true };
+  assert.deepEqual(readWorkspaceSync(JSON.stringify(pending)), pending);
+  assert.equal(readWorkspaceSync(null), undefined);
+  assert.equal(readWorkspaceSync("{"), undefined);
+  assert.equal(readWorkspaceSync(JSON.stringify({ ...pending, revision: -1 })), undefined);
+});
+
+test("classes ended early appear in history and cannot appear as upcoming", () => {
+  const now = new Date(2026, 10, 25, 8);
+  const ended = { id: "early", status: "ENDED EARLY", date: "2026-11-26", time: "09:00" };
+  assert.deepEqual(filterSchedule([ended], "Upcoming", now), []);
+  assert.deepEqual(filterSchedule([ended], "Completed", now), [ended]);
+});
+
 test("templates respect removed movements and leave an incomplete draft for an empty library", () => {
   assert.deepEqual(createCataloguePlan(plan().brief, [], "empty").movements, []);
   const sparse = createCataloguePlan(plan().brief, [
@@ -1058,6 +1108,11 @@ test("replacements use the live catalogue and replace both sides without losing 
   const family = original.movements[index].sourceMovementId;
   const library = [...additionalMovements,
     libraryMovement("new-paired", { reviewStatus: "reviewed", sideMode: "paired" })];
+  const choices = catalogueReplacementChoices(original, index, library);
+  assert(choices.some((choice) => choice.id === "new-paired"));
+  const chosen = replaceCatalogueMovement(original, index, library, "chosen", "new-paired");
+  assert.equal(chosen.filter((card) => card.sourceMovementId === "new-paired").length, 2);
+  assert.equal(replaceCatalogueMovement(original, index, library, "invalid", "missing"), original.movements);
   const next = replaceCatalogueMovement(original, index, library, "new");
   assert.equal(next.length, original.movements.length);
   assert(!next.some((item) => item.sourceMovementId === family));

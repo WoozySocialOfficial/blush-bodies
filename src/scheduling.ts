@@ -47,6 +47,9 @@ export const rescheduleSlot = <T extends SchedulePoint>(
   time: string,
 ): T => ({ ...slot, date, time });
 
+export const isFinishedClass = (slot: { status?: string }) =>
+  slot.status === "COMPLETED" || slot.status === "ENDED EARLY";
+
 export const upsertScheduleSlot = <T extends ScheduleSlot>(
   schedule: readonly T[],
   slot: T,
@@ -85,11 +88,11 @@ export const filterSchedule = <T extends SchedulePoint>(
     .filter((slot) => {
       if (filter === "Upcoming")
         return (
-          slot.status !== "COMPLETED" &&
+          !isFinishedClass(slot) &&
           slot.status !== "CANCELLED" &&
           isFutureScheduleSlot(slot, now)
         );
-      if (filter === "Completed") return slot.status === "COMPLETED";
+      if (filter === "Completed") return isFinishedClass(slot);
       if (filter === "Needs plan") return slot.status === "NEEDS PLAN";
       if (filter === "Drafts") return slot.status === "DRAFT";
       return slot.status === "CANCELLED";
