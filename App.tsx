@@ -265,7 +265,7 @@ const USER_STORAGE_PREFIX = "@blush-bodies/user-data-v2/";
 const WORKSPACE_RECOVERY_PREFIX = "@blush-bodies/workspace-recovery-v1/";
 const userStorageKey = (account: Pick<Account, "role" | "email">) =>
   `${USER_STORAGE_PREFIX}${account.role}/${account.email.toLowerCase()}`;
-const walkthroughStorageKey = (account: Pick<Account, "role" | "email">) =>
+const legacyWalkthroughStorageKey = (account: Pick<Account, "role" | "email">) =>
   `@blush-bodies/walkthrough-v1/${account.role}/${account.email.toLowerCase()}`;
 const CREDENTIALS_KEY = "blush-bodies-local-credentials-v1";
 const PASSWORD_MIN_LENGTH = 12;
@@ -957,11 +957,7 @@ function TopSafeArea() {
   const insets = useSafeAreaInsets();
   return <View style={{ height: insets.top }} />;
 }
-function Nav({ tab, setTab, highlightedTab }: {
-  tab: Tab;
-  setTab: (tab: Tab) => void;
-  highlightedTab?: Tab;
-}) {
+function Nav({ tab, setTab }: { tab: Tab; setTab: (tab: Tab) => void }) {
   const items: [Tab, string, typeof House][] = [
     ["home", "Home", House],
     ["classes", "Classes", CalendarDays],
@@ -975,7 +971,7 @@ function Nav({ tab, setTab, highlightedTab }: {
         <Pressable
           key={id}
           onPress={() => setTab(id)}
-          style={[s.navItem, highlightedTab === id && s.walkthroughTab]}
+          style={s.navItem}
           accessibilityRole="tab"
           accessibilityLabel={label}
           aria-selected={id === tab}
@@ -1013,63 +1009,6 @@ function Welcome({
         <Main label="Get Started" onPress={getStarted} />
         <Outline label="Log In" onPress={logIn} />
       </View>
-    </View>
-  );
-}
-const walkthroughSteps = [
-  {
-    tab: "home",
-    title: "Plan from Home",
-    copy: "Plan Class opens the builder. Choose a template or build your own sequence.",
-    nextLabel: "Classes",
-  },
-  {
-    tab: "classes",
-    title: "Find your class plans",
-    copy: "Continue a draft here, or open a saved plan to review it and start teaching.",
-    nextLabel: "Insights",
-  },
-  {
-    tab: "insights",
-    title: "Review past classes",
-    copy: "After you teach, open a session here to see its summary and teaching notes.",
-    nextLabel: null,
-  },
-] as const;
-
-function WalkthroughTip({ index, close }: { index: number; close: () => void }) {
-  const step = walkthroughSteps[index];
-  return (
-    <View style={s.walkthroughTip}>
-      <View style={s.row}>
-        <Text accessibilityRole="header" accessibilityLiveRegion="polite" style={s.moveTitle}>{step.title}</Text>
-        <Text style={s.sub}>{index + 1} of {walkthroughSteps.length}</Text>
-      </View>
-      <Text style={s.sub}>{step.copy}</Text>
-      <View style={s.walkthroughTipFooter}>
-        {step.nextLabel ? <Text style={s.walkthroughHint}>Tap {step.nextLabel} below to continue.</Text> : null}
-        <Pressable onPress={close} style={s.walkthroughAction}
-          accessibilityRole="button" accessibilityLabel={step.nextLabel ? "Skip walkthrough" : "Done"}>
-          <Text style={s.outlineText}>{step.nextLabel ? "Skip" : "Done"}</Text>
-        </Pressable>
-      </View>
-    </View>
-  );
-}
-
-function WalkthroughInvite({ start, dismiss }: { start: () => void; dismiss: () => void }) {
-  return (
-    <View style={s.walkthroughInvite}>
-      <Pressable onPress={start} style={s.walkthroughInviteMain}
-        accessibilityRole="button" accessibilityLabel="Take the app tour">
-        <View style={s.avatar}><Info size={20} color={C.rose} /></View>
-        <Text style={[s.moveTitle, s.flex]}>Take the app tour</Text>
-        <ChevronRight size={18} color={C.rose} />
-      </Pressable>
-      <Pressable onPress={dismiss} style={s.walkthroughAction}
-        accessibilityRole="button" accessibilityLabel="Dismiss tour invitation">
-        <X size={18} color={C.muted} />
-      </Pressable>
     </View>
   );
 }
@@ -1760,8 +1699,6 @@ function InstructorHome({
   setSelectedDate,
   activeSession,
   create,
-  walkthroughInvite,
-  highlightPlan,
   assign,
   start,
   resume,
@@ -1776,8 +1713,6 @@ function InstructorHome({
   setSelectedDate: (date: string) => void;
   activeSession?: ActiveTeachingSession;
   create: () => void;
-  walkthroughInvite?: React.ReactNode;
-  highlightPlan?: boolean;
   assign: (slot: ScheduledClass) => void;
   start: (slot: ScheduledClass) => void;
   resume: () => void;
@@ -1835,7 +1770,6 @@ function InstructorHome({
           <UserRound size={20} color={C.rose} />
         </View>
       </View>
-      {walkthroughInvite}
       {activeSession ? (
         <Pressable
           onPress={resume}
@@ -1881,7 +1815,7 @@ function InstructorHome({
         <Text style={s.section}>{classDateLabel(selectedDate)} Classes</Text>
         <Pressable
           onPress={create}
-          style={[s.plan, highlightPlan && s.walkthroughPlan]}
+          style={s.plan}
           accessibilityRole="button"
           accessibilityLabel="Plan a class"
         >
@@ -2902,6 +2836,7 @@ function Generated({
   schedule,
   back,
   edit,
+  rebuild,
   save,
   schedulePlan,
   teach,
@@ -2911,6 +2846,7 @@ function Generated({
   schedule: ScheduledClass[];
   back: () => void;
   edit: (phase?: Phase) => void;
+  rebuild: () => void;
   save: () => void;
   schedulePlan: () => void;
   teach: (slotId?: string) => void;
@@ -2918,6 +2854,7 @@ function Generated({
   const now = useLiveNow();
   const readiness = classReadiness(plan, library);
   const valid = readiness.ready;
+  const saved = plan.status === "saved";
   const durationMs = planTotal(plan) * 1000;
   const nextClass = schedule
     .filter(
@@ -2929,6 +2866,7 @@ function Generated({
     )
     .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`))[0];
   const nextAvailable = nextAvailableClassSlot(schedule, now);
+  const scheduleLabel = nextClass ? "Schedule Another" : "Schedule Class";
   return (
     <View style={s.flex}>
       <ScrollView contentContainerStyle={s.page}>
@@ -2946,13 +2884,13 @@ function Generated({
         <Text style={s.planSub}>
           {plan.brief.program} · {plan.brief.week} · {plan.brief.day}
         </Text>
-        {plan.status === "saved" ? (
+        {saved && (nextClass || valid) ? (
           <Text style={s.sub}>
             {nextClass
               ? `Scheduled: ${classDateLabel(nextClass.date, true)} at ${nextClass.time}`
               : `Next available: ${classDateLabel(nextAvailable.date, true)} at ${nextAvailable.time}`}
           </Text>
-        ) : plan.brief.scheduledDate && plan.brief.scheduledTime ? (
+        ) : !saved && plan.brief.scheduledDate && plan.brief.scheduledTime ? (
           <Text style={s.sub}>
             {classDateLabel(plan.brief.scheduledDate, true)} at{" "}
             {plan.brief.scheduledTime}
@@ -3006,8 +2944,11 @@ function Generated({
           );
         })}
         <ReadinessChecks report={readiness} />
+        {saved && valid && readiness.warnings.length > 0 ? (
+          <Outline label="Rebuild as Draft" onPress={rebuild} />
+        ) : null}
       </ScrollView>
-      {!valid && plan.status !== "saved" ? (
+      {!valid && !saved ? (
         <View style={s.sticky}>
           <Main label="Fix Sequence" onPress={() => edit()} />
         </View>
@@ -3019,20 +2960,18 @@ function Generated({
           <View style={s.flex}>
             <Main
               label={
-                plan.status === "saved"
-                  ? nextClass
-                    ? "Schedule Another"
-                    : "Schedule Class"
+                saved
+                  ? valid ? scheduleLabel : "Rebuild as Draft"
                   : plan.brief.scheduledDate
                     ? "Save & Schedule"
                     : "Save Plan"
               }
-              onPress={plan.status === "saved" ? schedulePlan : save}
+              onPress={saved ? (valid ? schedulePlan : rebuild) : save}
             />
           </View>
         </View>
       )}
-      {plan.status === "saved" && valid ? (
+      {saved && valid ? (
         <View style={s.stickySmall}>
           <Main label="Start Class" onPress={() => teach(nextClass?.id)} />
         </View>
@@ -4817,7 +4756,6 @@ function Profile({
   navigate,
   manageData,
   openSecurity,
-  openWalkthrough,
   logout,
   saveStatus,
 }: {
@@ -4828,7 +4766,6 @@ function Profile({
   navigate: (screen: Tab) => void;
   manageData: () => void;
   openSecurity: () => void;
-  openWalkthrough: () => void;
   logout: () => void;
   saveStatus: "saved" | "saving" | "error";
 }) {
@@ -5046,10 +4983,6 @@ function Profile({
       <View>
         <Text style={s.group}>SUPPORT</Text>
         <View style={s.settings}>
-          <Pressable onPress={openWalkthrough} style={s.setting} accessibilityRole="button">
-            <Text style={s.settingText}>App Walkthrough</Text>
-            <ChevronRight size={20} color={C.muted} />
-          </Pressable>
           <Pressable onPress={manageData} style={s.setting}>
             <Text style={s.settingText}>App Data & Reset</Text>
             <ChevronRight size={20} color={C.muted} />
@@ -5386,7 +5319,7 @@ function ManagePlan({
   back: () => void;
   open: () => void;
   duplicate: () => void;
-  assign: () => void;
+  assign?: () => void;
   rename: (name: string) => void;
   remove: () => void;
 }) {
@@ -5503,20 +5436,22 @@ function ManagePlan({
           </View>
           <ChevronRight size={19} color={C.muted} />
         </Pressable>
-        <Pressable onPress={assign} style={s.manageAction}>
-          <CalendarDays size={21} color={C.rose} />
-          <View style={s.flex}>
-            <Text style={s.settingText}>
-              {nextClass ? "Use for another class" : "Schedule class"}
-            </Text>
-            <Text style={s.sub}>
-              {nextClass
-                ? `Next: ${classDateLabel(nextClass.date, true)} at ${nextClass.time}`
-                : `Next available: ${classDateLabel(nextAvailable.date, true)} at ${nextAvailable.time}`}
-            </Text>
-          </View>
-          <ChevronRight size={19} color={C.muted} />
-        </Pressable>
+        {assign ? (
+          <Pressable onPress={assign} style={s.manageAction}>
+            <CalendarDays size={21} color={C.rose} />
+            <View style={s.flex}>
+              <Text style={s.settingText}>
+                {nextClass ? "Use for another class" : "Schedule class"}
+              </Text>
+              <Text style={s.sub}>
+                {nextClass
+                  ? `Next: ${classDateLabel(nextClass.date, true)} at ${nextClass.time}`
+                  : `Next available: ${classDateLabel(nextAvailable.date, true)} at ${nextAvailable.time}`}
+              </Text>
+            </View>
+            <ChevronRight size={19} color={C.muted} />
+          </Pressable>
+        ) : null}
       </View>
       <Pressable onPress={confirmDelete} style={s.dangerAction}>
         <Trash2 size={19} color="#A34848" />
@@ -6054,33 +5989,6 @@ function BlushBodiesApp() {
     });
   const [signedIn, setSignedIn] = useState(false);
   const [authReady, setAuthReady] = useState(!supabaseConfigured);
-  const [walkthroughOffer, setWalkthroughOffer] = useState<string>();
-  const [walkthrough, setWalkthrough] = useState<{
-    key: string;
-    index: number;
-    returnTo: "home" | "profile";
-  }>();
-  const walkthroughChecked = useRef<string | null>(null);
-  const walkthroughKey = walkthroughStorageKey(account);
-  const activeWalkthrough = walkthrough?.key === walkthroughKey ? walkthrough : undefined;
-  const walkthroughStep = activeWalkthrough && screen === walkthroughSteps[activeWalkthrough.index].tab
-    ? activeWalkthrough.index : undefined;
-  const newInstructor = !draftPlan && !savedPlans.length && !schedule.length &&
-    !sessionHistory.length && !activeTeachingSession;
-  useEffect(() => {
-    if (!authReady || !signedIn || screen !== "home" || !newInstructor ||
-        walkthroughChecked.current === walkthroughKey) return;
-
-    let active = true;
-    void AsyncStorage.getItem(walkthroughKey).then((seen) => {
-      if (!active) return;
-      walkthroughChecked.current = walkthroughKey;
-      if (!seen) setWalkthroughOffer(walkthroughKey);
-    }).catch(() => {
-      if (active) walkthroughChecked.current = walkthroughKey;
-    });
-    return () => { active = false; };
-  }, [authReady, signedIn, screen, newInstructor, walkthroughKey]);
   const [signInNotice, setSignInNotice] = useState<SignInNotice>();
   const [resetEmail, setResetEmail] = useState("");
   const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "error">(
@@ -6260,29 +6168,6 @@ function BlushBodiesApp() {
     setClassCreatorReturn(from);
     setScreen("create");
   };
-  const dismissWalkthrough = () => {
-    walkthroughChecked.current = walkthroughKey;
-    void AsyncStorage.setItem(walkthroughKey, "seen").catch(() => undefined);
-    setWalkthroughOffer(undefined);
-    setWalkthrough(undefined);
-  };
-  const startWalkthrough = (returnTo: "home" | "profile") => {
-    setWalkthroughOffer(undefined);
-    setWalkthrough({ key: walkthroughKey, index: 0, returnTo });
-    select("home");
-  };
-  const selectWalkthroughTab = (next: Tab) => {
-    if (activeWalkthrough) {
-      const index = walkthroughSteps.findIndex((step) => step.tab === next);
-      if (index === -1) dismissWalkthrough();
-      else setWalkthrough({ ...activeWalkthrough, index });
-    }
-    select(next);
-  };
-  const finishWalkthrough = () => {
-    dismissWalkthrough();
-    if (activeWalkthrough) select(activeWalkthrough.returnTo);
-  };
   const showDraft = (draft: ClassPlan) => {
     setPlan(draft);
     setDraftPlan(draft);
@@ -6303,6 +6188,14 @@ function BlushBodiesApp() {
     }
     proceed();
   };
+  const openNewDraft = (draft: ClassPlan) => withDraftSlot(draft.id, () => {
+    setEditorPhase("Warm-up");
+    setSequenceHistory([]);
+    setSequenceNotice("");
+    setLibraryPlanPhase(undefined);
+    showDraft(draft);
+    setScreen("editor");
+  });
   const duplicatePlan = (source: ClassPlan) => {
     const draft: ClassPlan = {
       ...source,
@@ -6315,13 +6208,24 @@ function BlushBodiesApp() {
         scheduledTime: undefined,
       },
     };
-    withDraftSlot(draft.id, () => {
-      setEditorPhase("Warm-up");
-      setSequenceHistory([]);
-      setSequenceNotice("");
-      showDraft(draft);
-      setScreen("editor");
-    });
+    setAssignmentSlotId(undefined);
+    openNewDraft(draft);
+  };
+  const rebuildPlan = (source: ClassPlan) => {
+    const draft = createPlan({
+      ...source.brief,
+      scheduledDate: undefined,
+      scheduledTime: undefined,
+    }, libraryMovements);
+    if (!classReadiness(draft, libraryMovements).ready) {
+      showAlert(
+        "More reviewed movements needed",
+        "The library could not build a complete class with this level and equipment. Edit the sequence or try a different class setup.",
+      );
+      return;
+    }
+    setAssignmentSlotId(undefined);
+    openNewDraft({ ...draft, version: source.version + 1 });
   };
   const persistPlan = () => {
     setSequenceHistory([]);
@@ -7624,9 +7528,6 @@ function BlushBodiesApp() {
     remoteWorkspaceRevision.current = 0;
     remoteWorkspaceHydrated.current = false;
     lastRemoteSave.current = null;
-    walkthroughChecked.current = null;
-    setWalkthroughOffer(undefined);
-    setWalkthrough(undefined);
     signInAttempts.delete(signInAttemptKey(account.role, account.email));
     setSignedIn(false);
     resetWorkspace({
@@ -7656,7 +7557,9 @@ function BlushBodiesApp() {
       const clearCachedData = async () => {
         const keys = await AsyncStorage.getAllKeys();
         await AsyncStorage.multiRemove([
-          key, walkthroughKey, ...keys.filter((item) => item.startsWith(recoveryPrefix)),
+          key,
+          legacyWalkthroughStorageKey(account),
+          ...keys.filter((item) => item.startsWith(recoveryPrefix)),
         ]);
       };
       const cleanup = await Promise.allSettled([
@@ -7680,7 +7583,7 @@ function BlushBodiesApp() {
   const resetAppData = async () => {
     try {
       await saveChain.current;
-      await AsyncStorage.multiRemove([userStorageKey(account), walkthroughKey]);
+      await AsyncStorage.multiRemove([userStorageKey(account), legacyWalkthroughStorageKey(account)]);
       if (supabaseConfigured) {
         const { error } = await requireSupabase().auth.signOut();
         if (error) throw error;
@@ -7948,11 +7851,11 @@ function BlushBodiesApp() {
           back={() => setScreen("classes")}
           open={() => setScreen("generated")}
           duplicate={() => duplicatePlan(plan)}
-          assign={() => {
+          assign={classReadiness(plan, libraryMovements).ready ? () => {
             setAssignmentSlotId(undefined);
             setSchedulePlanReturn("managePlan");
             setScreen("assign");
-          }}
+          } : undefined}
           rename={renamePlan}
           remove={deletePlan}
         />
@@ -8005,10 +7908,6 @@ function BlushBodiesApp() {
             setSelectedDate={setHomeDate}
             activeSession={activeTeachingSession}
             create={() => openClassCreator("home")}
-            highlightPlan={walkthroughStep === 0}
-            walkthroughInvite={walkthroughOffer === walkthroughKey && newInstructor ? (
-              <WalkthroughInvite start={() => startWalkthrough("home")} dismiss={dismissWalkthrough} />
-            ) : undefined}
             assign={(slot) => {
               setAssignmentSlotId(slot.id);
               setScreen("assign");
@@ -8049,24 +7948,16 @@ function BlushBodiesApp() {
             back={() => setScreen(classCreatorReturn)}
             generate={(brief, fromScratch) => {
               const draft = createPlan(brief, fromScratch ? [] : libraryMovements);
-              const openDraft = () => withDraftSlot(draft.id, () => {
-                setEditorPhase("Warm-up");
-                showDraft(draft);
-                setSequenceHistory([]);
-                setSequenceNotice("");
-                setLibraryPlanPhase(undefined);
-                setScreen("editor");
-              });
               if (!fromScratch && !draft.movements.length) {
                 confirmAction({
                   title: "No matching movements",
                   message: "Change the class level or equipment, or choose movements yourself.",
                   confirmText: "Build From Scratch",
                   cancelText: "Change Settings",
-                  onConfirm: openDraft,
+                  onConfirm: () => openNewDraft(draft),
                   Icon: Info,
                 });
-              } else openDraft();
+              } else openNewDraft(draft);
             }}
           />
         ) : null}
@@ -8080,6 +7971,7 @@ function BlushBodiesApp() {
               setEditorPhase(phase ?? "Warm-up");
               setScreen("editor");
             }}
+            rebuild={() => rebuildPlan(plan)}
             save={savePlan}
             schedulePlan={() => {
               setAssignmentSlotId(undefined);
@@ -8223,20 +8115,15 @@ function BlushBodiesApp() {
             }}
             manageData={() => setScreen("dataSettings")}
             openSecurity={() => setScreen("changePassword")}
-            openWalkthrough={() => startWalkthrough("profile")}
             logout={logout}
             saveStatus={saveStatus}
           />
         ) : null}
       </View>
-      {walkthroughStep !== undefined ? (
-        <WalkthroughTip index={walkthroughStep} close={finishWalkthrough} />
-      ) : null}
       {(
         ["home", "classes", "library", "insights", "profile"] as Screen[]
       ).includes(screen) ? (
-        <Nav tab={tab} setTab={selectWalkthroughTab}
-          highlightedTab={walkthroughStep === undefined ? undefined : walkthroughSteps[walkthroughStep + 1]?.tab} />
+        <Nav tab={tab} setTab={select} />
       ) : null}
       {pendingUndo ? (
         <UndoBanner
@@ -8298,45 +8185,6 @@ const s = StyleSheet.create({
   app: { flex: 1, minWidth: 0, backgroundColor: C.bg },
   flex: { flex: 1, minWidth: 0 },
   page: { paddingHorizontal: 24, paddingBottom: 28, gap: 20 },
-  walkthroughInvite: {
-    flexDirection: "row",
-    alignItems: "center",
-    borderRadius: 16,
-    backgroundColor: C.card,
-    borderColor: C.line,
-    borderWidth: 1,
-  },
-  walkthroughInviteMain: {
-    flex: 1,
-    minHeight: 60,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingLeft: 12,
-  },
-  walkthroughTip: {
-    marginHorizontal: 16,
-    marginBottom: 8,
-    paddingHorizontal: 14,
-    paddingTop: 12,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: "#D8AAB5",
-    backgroundColor: C.card,
-    gap: 5,
-  },
-  walkthroughTipFooter: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: 8 },
-  walkthroughHint: { flex: 1, color: C.rose, fontSize: 12, fontWeight: "800" },
-  walkthroughAction: { minWidth: 44, minHeight: 44, alignItems: "center", justifyContent: "center" },
-  walkthroughPlan: { borderWidth: 3, borderColor: "#E6BBC4" },
-  walkthroughTab: {
-    marginHorizontal: 2,
-    marginVertical: 3,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: C.rose,
-    backgroundColor: "#F3E3E5",
-  },
   row: {
     minWidth: 0,
     flexDirection: "row",
