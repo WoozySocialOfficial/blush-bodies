@@ -1,20 +1,6 @@
 export const WORKSPACE_BACKUP_FORMAT = "blush-bodies-workspace-backup";
 export const WORKSPACE_BACKUP_VERSION = 1;
 
-export const downloadWorkspaceBackup = (name: string, contents: string) => {
-  const url = URL.createObjectURL(new Blob([contents], { type: "application/json" }));
-  const link = document.createElement("a");
-  try {
-    link.href = url;
-    link.download = name;
-    document.body.appendChild(link);
-    link.click();
-  } finally {
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-};
-
 type BackupAccount = {
   email: string;
   role: string;

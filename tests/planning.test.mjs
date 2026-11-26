@@ -16,14 +16,14 @@ import {
   upsertScheduleSlot,
 } from "../src/scheduling.ts";
 import {
-  classCalendarDates, classCalendarIcs, googleCalendarUrl,
+  classCalendarEvent, classCalendarIcs, googleCalendarUrl,
 } from "../src/calendar.ts";
 import {
   RECENTLY_DELETED_RETENTION_DAYS, pruneRecentlyDeleted,
   recentlyDeletedDaysRemaining, restoreScheduleAssignments,
 } from "../src/recentlyDeleted.ts";
 import {
-  countdownCueSecond, isRecoverableTeachingSession, recoverTeachingPosition,
+  advanceTeachingPosition, countdownCueSecond, isRecoverableTeachingSession, recoverTeachingPosition, teachingTimeRemaining,
 } from "../src/teaching.ts";
 import { enqueueWorkspaceSave, readWorkspaceSync } from "../src/workspacePersistence.ts";
 import {
@@ -384,21 +384,28 @@ test("cancelled classes do not block the next available time", () => {
   );
 });
 
-test("calendar exports keep the class time and a 45-minute duration", () => {
+test("native and web calendar events keep the exact booking time and 45-minute duration", () => {
   const scheduledClass = {
     id: "class-one",
     date: "2026-10-22",
-    time: "09:15",
+    time: "14:45",
     level: "Beginner",
     lesson: "Week 1 / Day 1",
   };
-  const { start, end } = classCalendarDates(scheduledClass);
-  assert.equal((end.getTime() - start.getTime()) / 60000, 45);
+  const { startDate, endDate, title, notes } = classCalendarEvent(scheduledClass);
+  assert.deepEqual(startDate, new Date(2026, 9, 22, 14, 45));
+  assert.deepEqual(endDate, new Date(2026, 9, 22, 15, 30));
+  assert.equal(title, "Blush Bodies Beginner Class");
+  assert.equal(notes, "Week 1 / Day 1 / 45-minute class");
+  const stamp = (date) => date.toISOString().replace(/[-:]/g, "").replace(/\.000Z$/, "Z");
   const ics = classCalendarIcs(scheduledClass, new Date("2026-10-21T10:00:00Z"));
   assert.match(ics, /BEGIN:VEVENT/);
   assert.match(ics, /SUMMARY:Blush Bodies Beginner Class/);
-  assert.match(ics, /DTEND:/);
-  assert.match(googleCalendarUrl(scheduledClass), /calendar\.google\.com/);
+  assert(ics.includes(`DTSTART:${stamp(startDate)}\r\n`));
+  assert(ics.includes(`DTEND:${stamp(endDate)}\r\n`));
+  const googleUrl = new URL(googleCalendarUrl(scheduledClass));
+  assert.equal(googleUrl.hostname, "calendar.google.com");
+  assert.equal(googleUrl.searchParams.get("dates"), `${stamp(startDate)}/${stamp(endDate)}`);
 });
 
 test("countdown cues play once at three, two and one seconds when enabled", () => {
@@ -425,6 +432,24 @@ test("interrupted teaching resumes at the elapsed movement position", () => {
   }, movements, savedAt + 120_000), {
     movementIndex: 1,
     remainingSeconds: 42,
+  });
+});
+
+test("teaching countdowns use the current movement and all later movements", () => {
+  const movements = [{ duration: 60 }, { duration: 120 }, { duration: 90 }];
+  const position = { movementIndex: 0, remainingSeconds: 15 };
+  assert.deepEqual(teachingTimeRemaining(position, movements), {
+    movementSeconds: 15, classSeconds: 225,
+  });
+  const advanced = advanceTeachingPosition(position, movements, 20);
+  assert.deepEqual(teachingTimeRemaining(advanced, movements), {
+    movementSeconds: 115, classSeconds: 205,
+  });
+  assert.deepEqual(teachingTimeRemaining({ movementIndex: 2, remainingSeconds: 90 }, movements), {
+    movementSeconds: 90, classSeconds: 90,
+  });
+  assert.deepEqual(teachingTimeRemaining({ movementIndex: 2, remainingSeconds: 0 }, movements), {
+    movementSeconds: 0, classSeconds: 0,
   });
 });
 

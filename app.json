@@ -18,6 +18,9 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.blushbodies.planner",
       "buildNumber": "1",
+      "infoPlist": {
+        "NSCalendarsUsageDescription": "Allow Blush Bodies Planner to add your booked classes to Calendar."
+      },
       "config": {
         "usesNonExemptEncryption": false
       }

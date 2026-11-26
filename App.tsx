@@ -7,6 +7,7 @@ import {
   countdownCueSecond,
   isRecoverableTeachingSession,
   recoverTeachingPosition,
+  teachingTimeRemaining,
 } from "./src/teaching";
 import { enqueueWorkspaceSave, readWorkspaceSync, workspaceErrorMessage } from "./src/workspacePersistence";
 import {
@@ -33,7 +34,6 @@ import {
 } from "./src/movementImages";
 import {
   createWorkspaceBackupEnvelope,
-  downloadWorkspaceBackup,
   parseWorkspaceBackup,
   safeBackupImageFileName,
 } from "./src/workspaceBackup";
@@ -54,10 +54,12 @@ import {
   type ScheduleFilter,
 } from "./src/scheduling";
 import {
+  classCalendarEvent,
   classCalendarFileName,
   classCalendarIcs,
   googleCalendarUrl,
 } from "./src/calendar";
+import { downloadBrowserFile } from "./src/browserDownload";
 import {
   pruneRecentlyDeleted,
   recentlyDeletedDaysRemaining,
@@ -113,6 +115,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Timer,
   Trash2,
   Undo2,
   UserRound,
@@ -126,6 +129,7 @@ import {
   useContext,
   useDeferredValue,
   useEffect,
+  useImperativeHandle,
   useMemo,
   useRef,
   useState,
@@ -414,12 +418,13 @@ const classDateLabel = (key: string, long = false) => {
   });
 };
 const openGoogleCalendar = async (scheduledClass: ScheduledClass) => {
-  const url = googleCalendarUrl(scheduledClass);
-  if (!(await Linking.canOpenURL(url)))
-    throw new Error("Google Calendar is unavailable.");
-  await Linking.openURL(url);
+  await Linking.openURL(googleCalendarUrl(scheduledClass));
 };
 const shareCalendarEvent = async (scheduledClass: ScheduledClass) => {
+  if (Platform.OS === "web") {
+    downloadBrowserFile(classCalendarFileName(scheduledClass), classCalendarIcs(scheduledClass), "text/calendar");
+    return;
+  }
   if (!FileSystem.cacheDirectory)
     throw new Error("Calendar file storage is unavailable.");
   if (!(await Sharing.isAvailableAsync()))
@@ -434,7 +439,8 @@ const shareCalendarEvent = async (scheduledClass: ScheduledClass) => {
     UTI: "public.ics",
   });
 };
-const addClassToCalendar = (
+let openingDeviceCalendar = false;
+const addClassToCalendar = async (
   scheduledClass: ScheduledClass,
   showAlert: AppDialogControls["showAlert"],
 ) => {
@@ -443,9 +449,22 @@ const addClassToCalendar = (
       "Calendar unavailable",
       "The class could not be opened in a calendar. Please try again.",
     );
-  if (Platform.OS === "web") {
-    void openGoogleCalendar(scheduledClass).catch(handleError);
-    return;
+  if (Platform.OS === "ios" || Platform.OS === "android") {
+    if (openingDeviceCalendar) return;
+    openingDeviceCalendar = true;
+    try {
+      const calendar = await import("expo-calendar/legacy");
+      // iOS 16 requires authorization to open the system event editor.
+      if (Platform.OS !== "ios" || Number.parseInt(String(Platform.Version), 10) >= 17 ||
+          (await calendar.requestCalendarPermissionsAsync()).granted) {
+        await calendar.createEventInCalendarAsync(classCalendarEvent(scheduledClass));
+        return;
+      }
+    } catch {
+      // The export options are also available in builds without the native module.
+    } finally {
+      openingDeviceCalendar = false;
+    }
   }
   showAlert(
     "Add to calendar",
@@ -453,7 +472,7 @@ const addClassToCalendar = (
     [
       { text: "Cancel", style: "cancel" },
       {
-        text: "Apple / Other",
+        text: Platform.OS === "web" ? "Download Calendar File" : "Share Calendar File",
         onPress: () => void shareCalendarEvent(scheduledClass).catch(handleError),
       },
       {
@@ -787,6 +806,26 @@ function Outline({ label, onPress }: { label: string; onPress: () => void }) {
     >
       <Text style={s.outlineText}>{label}</Text>
     </Pressable>
+  );
+}
+function ClassCalendarOffer({ slot, dismiss }: { slot: ScheduledClass; dismiss: () => void }) {
+  const { showAlert } = useAppDialog();
+  return (
+    <View style={s.calendarOffer} accessibilityLiveRegion="polite">
+      <View style={s.row}>
+        <View style={s.flex}>
+          <Text style={s.moveTitle}>Class booked</Text>
+          <Text style={s.sub}>{classDateLabel(slot.date, true)} at {slot.time}</Text>
+        </View>
+        <Pressable onPress={dismiss} accessibilityRole="button" accessibilityLabel="Dismiss calendar suggestion" style={s.calendarOfferDismiss}>
+          <X size={20} color={C.muted} />
+        </Pressable>
+      </View>
+      <Outline label="Add to Calendar" onPress={() => {
+        dismiss();
+        void addClassToCalendar(slot, showAlert);
+      }} />
+    </View>
   );
 }
 function AppDialog({
@@ -2513,7 +2552,7 @@ function ScheduleManager({
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={`Add ${slot.level} class to calendar`}
-                onPress={() => addClassToCalendar(slot, showAlert)}
+                onPress={() => void addClassToCalendar(slot, showAlert)}
                 hitSlop={10}
               >
                 <CalendarPlus size={18} color={C.rose} />
@@ -5576,6 +5615,45 @@ function ManagePlan({
   );
 }
 
+type TeachingTime = ReturnType<typeof teachingTimeRemaining>;
+type UpdateTeachingTime = (time: TeachingTime) => void;
+
+function TeachingCountdowns({
+  initialTime,
+  compact,
+  ref,
+}: {
+  initialTime: TeachingTime;
+  compact: boolean;
+  ref: React.Ref<UpdateTeachingTime>;
+}) {
+  const [time, setTime] = useState(initialTime);
+  // Only the countdowns need to render on every tick.
+  useImperativeHandle(ref, () => setTime, []);
+  return (
+    <View style={s.teachTimerRow}>
+      <View style={[s.teachTimerBlock, s.teachTimerMovement, compact && s.teachTimerBlockCompact]}>
+        <View style={[s.teachTimerIcon, s.teachTimerMovementIcon]}>
+          <Timer size={16} color={C.rose} />
+        </View>
+        <View style={s.teachTimerCopy}>
+          <Text style={s.teachTimerLabel}>Movement left</Text>
+          <Text style={[s.teachTimer, s.teachMovementTime]}>{fmt(Math.ceil(time.movementSeconds))}</Text>
+        </View>
+      </View>
+      <View style={[s.teachTimerBlock, compact && s.teachTimerBlockCompact]}>
+        <View style={s.teachTimerIcon}>
+          <Clock3 size={16} color={C.sage} />
+        </View>
+        <View style={s.teachTimerCopy}>
+          <Text style={s.teachTimerLabel}>Class left</Text>
+          <Text style={s.teachTimer}>{fmt(Math.ceil(time.classSeconds))}</Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+
 function TeachingSession({
   session,
   preferences,
@@ -5596,7 +5674,7 @@ function TeachingSession({
   const compactTeachingView = viewportHeight < 820 || viewportWidth < 390;
   const largeTeachingView = viewportWidth >= 600 && viewportHeight >= 820;
   const teachingArtworkMinHeight = veryCompactTeachingView
-    ? 112
+    ? 96
     : compactTeachingView
       ? 152
       : largeTeachingView
@@ -5625,6 +5703,7 @@ function TeachingSession({
   const indexRef = useRef(restored.movementIndex);
   const moveTimeRef = useRef(restored.remainingSeconds);
   const lastTickAt = useRef(Date.now());
+  const updateCountdowns = useRef<UpdateTeachingTime>(null);
   const cardOffset = useRef(new Animated.Value(0)).current;
   const cardOpacity = useRef(new Animated.Value(1)).current;
   const transitioning = useRef(false);
@@ -5660,11 +5739,13 @@ function TeachingSession({
         useNativeDriver: true,
       }),
     ]).start(() => {
+      const remainingSeconds = movements[safe].duration;
       indexRef.current = safe;
-      moveTimeRef.current = movements[safe].duration;
+      moveTimeRef.current = remainingSeconds;
+      updateCountdowns.current?.(teachingTimeRemaining({ movementIndex: safe, remainingSeconds }, movements));
       setIndex(safe);
       lastTickAt.current = Date.now();
-      saveCheckpoint(safe, movements[safe].duration, held);
+      saveCheckpoint(safe, remainingSeconds, held);
       cardOffset.setValue(52);
       Animated.parallel([
         Animated.timing(cardOffset, {
@@ -5738,6 +5819,9 @@ function TeachingSession({
       }, movements, elapsedSeconds);
 
       const movementChanged = nextIndex !== indexRef.current;
+      if (movementChanged || remainingSeconds !== moveTimeRef.current) {
+        updateCountdowns.current?.(teachingTimeRemaining({ movementIndex: nextIndex, remainingSeconds }, movements));
+      }
       indexRef.current = nextIndex;
       moveTimeRef.current = remainingSeconds;
       if (movementChanged) {
@@ -5823,13 +5907,23 @@ function TeachingSession({
             {plan.brief.week} · {plan.brief.day}
           </Text>
         </View>
+        <View style={s.teachProgress}>
+          <View style={[s.teachStatus, held && s.teachStatusPaused]}>
+            <View style={[s.teachStatusDot, held && s.teachStatusDotPaused]} />
+            <Text style={[s.teachStatusLabel, held && s.teachStatusLabelPaused]}>
+              {held ? "Paused" : "In progress"}
+            </Text>
+          </View>
+          <Text style={s.teachStepLabel}>
+            Step {index + 1} of {movements.length}
+          </Text>
+        </View>
       </View>
-      <View style={[s.teachStepHeading, veryCompactTeachingView && s.teachStepHeadingVeryCompact]}>
-        <Text style={s.label}>{held ? "CLASS PAUSED" : "CLASS IN PROGRESS"}</Text>
-        <Text style={s.teachStepLabel}>
-          Step {index + 1} of {movements.length}
-        </Text>
-      </View>
+      <TeachingCountdowns
+        ref={updateCountdowns}
+        initialTime={teachingTimeRemaining(restored, movements)}
+        compact={veryCompactTeachingView}
+      />
       <Animated.View
         style={[
           s.movementCard,
@@ -5938,20 +6032,24 @@ function TeachingSession({
         accessibilityLabel={upcoming ? `Next movement: ${upcoming.title}` : "Finish class and view summary"}
       >
         <View style={s.flex}>
-          <Text style={s.label}>
+          <Text style={[s.label, veryCompactTeachingView && s.upNextTextVeryCompact]}>
             {upcoming ? "UP NEXT" : "FINAL MOVEMENT"}
           </Text>
-          <Text style={[s.outlineText, s.upText]} numberOfLines={1}>
+          <Text style={[s.outlineText, s.upText, veryCompactTeachingView && s.upTextVeryCompact]} numberOfLines={1}>
             {upcoming
               ? upcoming.title
               : "Finish & View Summary"}
           </Text>
-          {upcoming && sideLabel(upcoming) ? <Text style={s.upNextSide} numberOfLines={1}>{sideLabel(upcoming)}</Text> : null}
+          {upcoming && sideLabel(upcoming) ? (
+            <Text style={[s.upNextSide, veryCompactTeachingView && s.upNextSideVeryCompact]} numberOfLines={1}>
+              {sideLabel(upcoming)}
+            </Text>
+          ) : null}
           {upcoming ? (
-            <View style={s.upNextMeta}>
-              <Text style={s.upTime}>{fmt(upcoming.duration)}</Text>
-              <Text style={s.upNextDot}>·</Text>
-              <Text style={s.upTime}>{upcoming.position}</Text>
+            <View style={[s.upNextMeta, veryCompactTeachingView && s.upNextMetaVeryCompact]}>
+              <Text style={[s.upTime, veryCompactTeachingView && s.upNextTextVeryCompact]}>{fmt(upcoming.duration)}</Text>
+              <Text style={[s.upTime, veryCompactTeachingView && s.upNextTextVeryCompact]}>·</Text>
+              <Text style={[s.upTime, veryCompactTeachingView && s.upNextTextVeryCompact]}>{upcoming.position}</Text>
             </View>
           ) : null}
         </View>
@@ -6044,6 +6142,7 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
     ActiveTeachingSession | undefined
   >();
   const [schedule, setSchedule] = useState<ScheduledClass[]>(initialSchedule);
+  const [calendarOfferId, setCalendarOfferId] = useState<string>();
   const displaySchedule = useMemo(() => schedule.map((slot) => {
     if (slot.status !== "COMPLETED") return slot;
     const result = sessionHistory.find((session) => session.scheduledClassId === slot.id);
@@ -6122,6 +6221,9 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
   }, []);
   const saveScheduledClass = (slot: ScheduledClass) => {
     setSchedule((current) => upsertScheduleSlot(current, slot));
+    if (!schedule.some((current) => current.id === slot.id) &&
+        slot.status !== "CANCELLED" && !isFinishedClass(slot) &&
+        isFutureScheduleSlot(slot, new Date())) setCalendarOfferId(slot.id);
   };
   const removeScheduledClass = (id: string) => {
     setSchedule((current) => removeScheduleSlot(current, id));
@@ -6926,6 +7028,7 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
     },
   });
   const resetWorkspace = (owner: Account) => {
+    setCalendarOfferId(undefined);
     setEditorPhase("All");
     setSequenceHistory([]);
     setSequenceNotice("");
@@ -6955,6 +7058,7 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
     });
   };
   const loadWorkspace = async (owner: Account) => {
+    setCalendarOfferId(undefined);
     setEditorPhase("All");
     setSequenceHistory([]);
     setSequenceNotice("");
@@ -7601,7 +7705,7 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
       const name = `blush-bodies-backup-${timestamp}.json`;
       const contents = JSON.stringify(createWorkspaceBackupEnvelope(workspace), null, 2);
       if (Platform.OS === "web") {
-        downloadWorkspaceBackup(name, contents);
+        downloadBrowserFile(name, contents, "application/json");
         return;
       }
       if (!FileSystem.cacheDirectory)
@@ -7780,6 +7884,12 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
     }
   };
   const recentlyDeletedCount = pruneRecentlyDeleted(recentlyDeleted).length;
+  const calendarOfferSlot = calendarOfferId ? schedule.find((slot) =>
+    slot.id === calendarOfferId && slot.status !== "CANCELLED" && slot.status !== "IN PROGRESS" &&
+    !isFinishedClass(slot) && isFutureScheduleSlot(slot, new Date())) : undefined;
+  const calendarOffer = calendarOfferSlot
+    ? <ClassCalendarOffer slot={calendarOfferSlot} dismiss={() => setCalendarOfferId(undefined)} />
+    : null;
   const renderLibrary = () => (
     <Library
       back={libraryPlanPhase ? () => {
@@ -8013,6 +8123,7 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
       <View style={s.app}>
         <StatusBar style="dark" />
         <TopSafeArea />
+        {calendarOffer}
         <ScheduleManager
           schedule={displaySchedule.map((slot) => slot.status === "READY" && !playablePlan(slot)
             ? { ...slot, status: "NEEDS PLAN" } : slot)}
@@ -8127,6 +8238,7 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
           </Pressable>
         </View>
       ) : null}
+      {screen === "home" || screen === "generated" ? calendarOffer : null}
       <View style={s.flex}>
         {screen === "home" ? (
           <InstructorHome
@@ -8437,6 +8549,8 @@ const s = StyleSheet.create({
   stack: { gap: 10 },
   syncNotice: { paddingHorizontal: 20, paddingVertical: 8, flexDirection: "row", gap: 12, alignItems: "center", backgroundColor: "#F4E3E3" },
   syncRetry: { paddingVertical: 8, paddingHorizontal: 4 },
+  calendarOffer: { backgroundColor: C.card, marginHorizontal: 24, marginVertical: 8, padding: 12, gap: 8, borderRadius: 14, borderWidth: 1, borderColor: C.line },
+  calendarOfferDismiss: { minWidth: 44, minHeight: 44, alignItems: "center", justifyContent: "center" },
   welcome: {
     flexGrow: 1,
     backgroundColor: C.bg,
@@ -9398,42 +9512,59 @@ const s = StyleSheet.create({
     borderRadius: 19,
   },
   teachSequence: { fontSize: 11 },
-  teachTimerBlock: {
-    paddingVertical: 4,
-    paddingHorizontal: 2,
-  },
-  teachTimerBlockCompact: { paddingVertical: 4 },
-  teachStepHeading: {
+  teachProgress: { alignItems: "flex-end", gap: 3, flexShrink: 1 },
+  teachStatus: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 2,
-    paddingVertical: 8,
+    gap: 5,
+    borderRadius: 12,
+    backgroundColor: C.paleSage,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
   },
-  teachStepHeadingVeryCompact: { paddingVertical: 4 },
+  teachStatusPaused: { backgroundColor: "#FBF3F3" },
+  teachStatusDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: C.sage },
+  teachStatusDotPaused: { backgroundColor: C.rose },
+  teachStatusLabel: { color: "#4D6658", fontSize: 10, fontWeight: "800" },
+  teachStatusLabelPaused: { color: C.rose },
   teachStepLabel: { color: C.muted, fontSize: 11, fontWeight: "500" },
   teachTimerRow: {
     flexDirection: "row",
-    alignItems: "baseline",
-    justifyContent: "center",
-    gap: 7,
-    marginTop: 2,
-  },
-  teachTimer: { color: C.ink, fontSize: 40, fontWeight: "800", fontVariant: ["tabular-nums"] },
-  teachTimerCompact: { fontSize: 34 },
-  teachTimerTotal: { color: C.muted, fontSize: 12, fontWeight: "400" },
-  teachTimerTrack: {
-    height: 3,
-    borderRadius: 3,
-    backgroundColor: "#EEE5E2",
+    marginTop: 4,
+    backgroundColor: C.card,
+    borderRadius: 13,
+    borderWidth: 1,
+    borderColor: C.line,
     overflow: "hidden",
-    marginTop: 6,
   },
-  teachTimerFill: {
-    height: "100%",
-    borderRadius: 3,
-    backgroundColor: C.rose,
+  teachTimerBlock: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
   },
+  teachTimerBlockCompact: { gap: 8, paddingVertical: 3 },
+  teachTimerMovement: {
+    backgroundColor: "#FBF3F3",
+    borderRightWidth: 1,
+    borderRightColor: C.line,
+  },
+  teachTimerIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: C.paleSage,
+  },
+  teachTimerMovementIcon: { backgroundColor: "#F4E5E7" },
+  teachTimerCopy: { flexShrink: 1, gap: 1 },
+  teachTimerLabel: { color: C.muted, fontSize: 11, lineHeight: 14, fontWeight: "700" },
+  teachTimer: { color: C.ink, fontSize: 23, lineHeight: 26, fontWeight: "800", fontVariant: ["tabular-nums"] },
+  teachMovementTime: { color: C.rose },
   movementCard: {
     flex: 1,
     minHeight: 0,
@@ -9543,18 +9674,21 @@ const s = StyleSheet.create({
     marginTop: 8,
     overflow: "hidden",
   },
-  upNextVeryCompact: { height: 64, marginTop: 5, paddingLeft: 11 },
+  upNextVeryCompact: { height: 64, marginTop: 5, paddingLeft: 11, paddingVertical: 3 },
   upNextComplete: { paddingRight: 14 },
   upText: { fontSize: 13, marginTop: 3 },
+  upTextVeryCompact: { marginTop: 1, lineHeight: 16 },
   upNextSide: { color: C.muted, fontSize: 10, marginTop: 2 },
+  upNextSideVeryCompact: { marginTop: 1, lineHeight: 12 },
   upNextMeta: {
     flexDirection: "row",
     alignItems: "center",
     gap: 5,
     marginTop: 5,
   },
+  upNextMetaVeryCompact: { marginTop: 2 },
   upTime: { color: C.muted, fontSize: 10 },
-  upNextDot: { color: C.muted, fontSize: 10 },
+  upNextTextVeryCompact: { lineHeight: 12 },
   upNextVisual: {
     width: 128,
     height: 76,
@@ -9563,7 +9697,7 @@ const s = StyleSheet.create({
     overflow: "hidden",
   },
   upNextVisualCompact: { width: 108 },
-  upNextVisualVeryCompact: { width: 92, height: 64, marginVertical: -6 },
+  upNextVisualVeryCompact: { width: 92, height: 64, marginVertical: -3 },
   upNextVisualManual: {
     borderLeftWidth: 1,
     borderLeftColor: C.line,

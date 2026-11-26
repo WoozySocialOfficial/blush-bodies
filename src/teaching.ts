@@ -20,6 +20,16 @@ type TeachingPosition = {
 
 type MovementPosition = Pick<TeachingPosition, "movementIndex" | "remainingSeconds">;
 
+export const teachingTimeRemaining = (
+  { movementIndex, remainingSeconds }: MovementPosition,
+  movements: TimedMovement[],
+) => ({
+  movementSeconds: remainingSeconds,
+  classSeconds: movements
+    .slice(movementIndex + 1)
+    .reduce((total, movement) => total + movement.duration, remainingSeconds),
+});
+
 export const advanceTeachingPosition = (
   position: MovementPosition,
   movements: TimedMovement[],

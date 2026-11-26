@@ -35,13 +35,23 @@ export const classCalendarDates = (
 export const classCalendarTitle = (scheduledClass: CalendarClass) =>
   `Blush Bodies ${scheduledClass.level} Class`;
 
-export const googleCalendarUrl = (scheduledClass: CalendarClass) => {
+export const classCalendarEvent = (scheduledClass: CalendarClass) => {
   const { start, end } = classCalendarDates(scheduledClass);
+  return {
+    title: classCalendarTitle(scheduledClass),
+    notes: `${scheduledClass.lesson} / 45-minute class`,
+    startDate: start,
+    endDate: end,
+  };
+};
+
+export const googleCalendarUrl = (scheduledClass: CalendarClass) => {
+  const { title, notes, startDate, endDate } = classCalendarEvent(scheduledClass);
   const params = [
     ["action", "TEMPLATE"],
-    ["text", classCalendarTitle(scheduledClass)],
-    ["dates", `${utcCalendarStamp(start)}/${utcCalendarStamp(end)}`],
-    ["details", `${scheduledClass.lesson} / 45-minute class`],
+    ["text", title],
+    ["dates", `${utcCalendarStamp(startDate)}/${utcCalendarStamp(endDate)}`],
+    ["details", notes],
   ]
     .map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
     .join("&");
@@ -55,7 +65,7 @@ export const classCalendarIcs = (
   scheduledClass: CalendarClass,
   createdAt = new Date(),
 ) => {
-  const { start, end } = classCalendarDates(scheduledClass);
+  const { title, notes, startDate, endDate } = classCalendarEvent(scheduledClass);
   return [
     "BEGIN:VCALENDAR",
     "VERSION:2.0",
@@ -65,10 +75,10 @@ export const classCalendarIcs = (
     "BEGIN:VEVENT",
     `UID:${escapeCalendarText(scheduledClass.id)}@busybodies.app`,
     `DTSTAMP:${utcCalendarStamp(createdAt)}`,
-    `DTSTART:${utcCalendarStamp(start)}`,
-    `DTEND:${utcCalendarStamp(end)}`,
-    `SUMMARY:${escapeCalendarText(classCalendarTitle(scheduledClass))}`,
-    `DESCRIPTION:${escapeCalendarText(`${scheduledClass.lesson} / 45-minute class`)}`,
+    `DTSTART:${utcCalendarStamp(startDate)}`,
+    `DTEND:${utcCalendarStamp(endDate)}`,
+    `SUMMARY:${escapeCalendarText(title)}`,
+    `DESCRIPTION:${escapeCalendarText(notes)}`,
     "END:VEVENT",
     "END:VCALENDAR",
     "",
