@@ -3,6 +3,7 @@ export type SequenceMode = "auto" | "manual";
 export type SideSelection = "both" | "left" | "right";
 export type WorkingSide = "left" | "right" | "alternating";
 export type ClassLevel = "Beginner" | "Intermediate" | "Advanced";
+export type ClassType = "Mat" | "Reformer";
 export const MOVEMENT_DURATION_SECONDS = 75;
 const MAX_FITTED_CARD_SECONDS = 5 * 60;
 export type PlanBrief = {
@@ -143,6 +144,15 @@ export const planLevel = (plan: ClassPlan) => {
   if (program.includes("intermediate")) return "Intermediate";
   return "Beginner";
 };
+export const classTypeForEquipment = (equipment: string | readonly string[]): ClassType => {
+  const items = typeof equipment === "string" ? movementEquipment(equipment) : equipment;
+  return items.some((item) => item.trim().toLowerCase() === "reformer") ? "Reformer" : "Mat";
+};
+export const bookingMatchesPlan = (
+  booking: { level: string; classType?: ClassType },
+  plan: ClassPlan,
+) => booking.level === planLevel(plan) &&
+  (booking.classType ?? "Mat") === classTypeForEquipment(plan.brief.equipment);
 export const positionGroup = (position: string) => {
   const normalized = position.toLowerCase();
   if (normalized.includes("standing")) return "Standing";
@@ -371,12 +381,14 @@ export const suggestMovements = (
   if (remaining <= 0) return [];
   const levels = ["Beginner", "Intermediate", "Advanced"];
   const level = levels.indexOf(planLevel(plan));
+  const classType = classTypeForEquipment(plan.brief.equipment);
   const equipment = new Set(plan.brief.equipment.map((item) => item.toLowerCase()));
   const phaseMoves = plan.movements.filter((move) => move.phase === phase);
   const last = phaseMoves[phaseMoves.length - 1];
   const used = new Set(plan.movements.map(movementSourceId));
   const candidates = library
     .filter((move) => !used.has(move.id) && (move.phases ?? ["Main"]).includes(phase) &&
+      classTypeForEquipment(move.equipment) === classType &&
       (!move.manual || move.reviewStatus !== "needs-review") &&
       levels.indexOf(move.level) >= 0 && levels.indexOf(move.level) <= level &&
       (phase !== "Main" || !move.mainLevel || levels.indexOf(move.mainLevel) <= level) &&
@@ -433,8 +445,13 @@ export const movementCompatibility = (plan: ClassPlan, source: LibraryMovement, 
   if (levels.indexOf(required) > levels.indexOf(planLevel(plan)))
     errors.push(`this version requires ${required === "Beginner" ? "a" : "an"} ${required.toLowerCase()} class.`);
   const available = new Set(plan.brief.equipment.map((item) => item.trim().toLowerCase()));
-  const missing = movementEquipment(source.equipment).filter((item) => !available.has(item.toLowerCase()));
-  if (missing.length) errors.push(`add ${missing.join(" and ")} to the class equipment.`);
+  const movementType = classTypeForEquipment(source.equipment);
+  if (movementType !== classTypeForEquipment(plan.brief.equipment)) {
+    errors.push(`choose a ${movementType} class to use this movement.`);
+  } else {
+    const missing = movementEquipment(source.equipment).filter((item) => !available.has(item.toLowerCase()));
+    if (missing.length) errors.push(`add ${missing.join(" and ")} to the class equipment.`);
+  }
   return errors;
 };
 
@@ -469,6 +486,8 @@ export const inspectClassReadiness = (plan: ClassPlan, library: LibraryMovement[
     const source = library.find((item) => item.id === family);
     if (source) {
       for (const message of movementCompatibility(plan, source, move.phase)) flag(`${source.name}: ${message}`);
+    } else if (plan.status === "draft" && family.startsWith("reformer-")) {
+      flag(`${move.title}: restore the library movement or replace it before saving.`);
     }
     const side = workingSide(move);
     if (move.requiresPair || source?.sideMode === "paired" || legacyPairedFamilies.has(family) || side === "left" || side === "right") {

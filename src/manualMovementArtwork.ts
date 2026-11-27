@@ -53,6 +53,8 @@ export const manualMovementArtwork: Partial<Record<string, ImageSourcePropType>>
   "manual-mermaid": require("../assets/manual-movements/mermaid.jpg"),
   "manual-figure-four-stretch": require("../assets/movement-figure-four.jpg"),
   "manual-spinal-twist-supine": require("../assets/movement-supine-twist.jpg"),
+  "manual-thread-the-needle": require("../assets/movement-thread-the-needle.jpg"),
+  "manual-child-pose": require("../assets/movement-child-pose.jpg"),
   "manual-double-arm-frontal-raise": require("../assets/manual-movements/double-arm-frontal-raise.jpg"),
   "manual-upper-body-reaches": require("../assets/manual-movements/upper-body-reaches.jpg"),
   "manual-mermaid-standing": require("../assets/manual-movements/mermaid-standing.jpg"),

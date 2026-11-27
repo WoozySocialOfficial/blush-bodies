@@ -1,8 +1,11 @@
+import type { ClassType } from "./planning.ts";
+
 type CalendarClass = {
   id: string;
   date: string;
   time: string;
   level: string;
+  classType?: ClassType;
   lesson: string;
 };
 
@@ -33,7 +36,7 @@ export const classCalendarDates = (
 };
 
 export const classCalendarTitle = (scheduledClass: CalendarClass) =>
-  `Blush Bodies ${scheduledClass.level} Class`;
+  `Blush Bodies ${scheduledClass.level}${scheduledClass.classType === "Reformer" ? " Reformer" : ""} Class`;
 
 export const classCalendarEvent = (scheduledClass: CalendarClass) => {
   const { start, end } = classCalendarDates(scheduledClass);

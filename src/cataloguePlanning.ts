@@ -1,15 +1,17 @@
 import {
-  MOVEMENT_DURATION_SECONDS, fitPhaseTiming, insertMovement, movementSourceId,
+  MOVEMENT_DURATION_SECONDS, classTypeForEquipment, fitPhaseTiming, insertMovement, movementSourceId,
   phaseRemaining, suggestMovements, workingSide,
   type ClassPlan, type LibraryMovement, type Phase, type PlanBrief,
 } from "./planning.ts";
 
-// Build from the live library so deleted or unreviewed movements cannot reappear.
+// Reformer starter drafts can include pending cards. Readiness still requires instructor approval.
 export const createCataloguePlan = (
   brief: PlanBrief, library: LibraryMovement[], id: string,
+  { draftForReview = false }: { draftForReview?: boolean } = {},
 ): ClassPlan => {
   let plan: ClassPlan = { id, version: 1, brief, status: "draft", sequenceMode: "auto", movements: [] };
-  const reviewed = library.filter((move) => move.reviewStatus === "reviewed" && move.cues.length);
+  const includePending = draftForReview && classTypeForEquipment(brief.equipment) === "Reformer";
+  const eligible = library.filter((move) => (includePending || move.reviewStatus === "reviewed") && move.cues.length);
   const energyOffset: Record<string, number> = {
     Flowing: 0,
     Calm: 1,
@@ -24,7 +26,7 @@ export const createCataloguePlan = (
   const phases: Phase[] = ["Warm-up", "Cool-down", "Main"];
   for (const phase of phases) {
     while (phaseRemaining(plan, phase) > 0) {
-      const suggestions = suggestMovements(plan, reviewed, phase);
+      const suggestions = suggestMovements(plan, eligible, phase);
       if (!suggestions.length) break;
       const offset = energyOffset[brief.energy] ?? 0;
       const energyIndex = brief.energy === "Strong" ? count * 2 + 1 : offset + count;

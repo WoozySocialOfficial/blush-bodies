@@ -1,6 +1,8 @@
 import { StatusBar } from "expo-status-bar";
 import { additionalMovements, retiredMovementIds } from "./src/catalogue";
+import { reformerMovements } from "./src/reformerCatalogue";
 import { manualMovementArtwork } from "./src/manualMovementArtwork";
+import { aiMovementArtwork } from "./src/aiMovementArtwork";
 import { catalogueReplacementChoices, createCataloguePlan, replaceCatalogueMovement } from "./src/cataloguePlanning";
 import {
   advanceTeachingPosition,
@@ -66,11 +68,11 @@ import {
   restoreScheduleAssignments,
 } from "./src/recentlyDeleted";
 import {
-  MOVEMENT_DURATION_SECONDS, PHASES, fillMissingPlanCues, fitPhaseTiming, insertMovement, mergeLibraryCatalog, movementAddition, movementCompatibility, movementEquipment, movementSourceId, nextPlanningPhase,
+  MOVEMENT_DURATION_SECONDS, PHASES, bookingMatchesPlan, classTypeForEquipment, fillMissingPlanCues, fitPhaseTiming, insertMovement, mergeLibraryCatalog, movementAddition, movementCompatibility, movementEquipment, movementSourceId, nextPlanningPhase,
   orderMovementsByPosition, phaseRemaining, phaseTarget, phaseTotal,
   planLevel, positionGroup, sequenceForTeaching,
   suggestMovements, syncMovementImage, updatePlanSequence, classReadiness, inspectClassReadiness, selectionDuration, sideLabel, workingSide,
-  type ClassPlan, type LibraryMovement, type Phase, type PlanBrief,
+  type ClassPlan, type ClassType, type LibraryMovement, type Phase, type PlanBrief,
   type PlanMovement, type SequenceMode, type SideSelection, type WorkingSide, type ReadinessReport,
 } from "./src/planning";
 import * as Crypto from "expo-crypto";
@@ -208,6 +210,7 @@ type ScheduledClass = {
   date: string;
   time: string;
   level: string;
+  classType?: ClassType;
   lesson: string;
   status:
     | "READY"
@@ -566,7 +569,8 @@ const useAppDialog = () => {
   if (!controls) throw new Error("AppDialogProvider is required.");
   return controls;
 };
-const initialLibrary: LibraryMovement[] = additionalMovements;
+const initialLibrary: LibraryMovement[] = [...additionalMovements, ...reformerMovements];
+const scheduledClassLabel = (slot: ScheduledClass) => `${slot.level} ${slot.classType ?? "Mat"}`;
 const initialSchedule: ScheduledClass[] = [];
 const fmt = (n: number) =>
   String(Math.floor(Math.max(0, n) / 60)).padStart(2, "0") +
@@ -580,7 +584,7 @@ const movementArtworkSource = (
   movement: Pick<PlanMovement, "id" | "position" | "sourceMovementId">,
 ) => {
   const sourceId = movementSourceId(movement);
-  const photo = manualMovementArtwork[sourceId];
+  const photo = manualMovementArtwork[sourceId] ?? aiMovementArtwork[sourceId];
   if (photo) return photo;
   switch (movementSourceId(movement)) {
     case "breath-centre":
@@ -693,8 +697,8 @@ const movementArtworkMode = (
   ].includes(movementSourceId(movement))
     ? "contain"
     : "cover";
-const createPlan = (brief: PlanBrief, library = initialLibrary): ClassPlan =>
-  createCataloguePlan(brief, library, `BB-${Crypto.randomUUID()}`);
+const createPlan = (brief: PlanBrief, library = initialLibrary, draftForReview = false): ClassPlan =>
+  createCataloguePlan(brief, library, `BB-${Crypto.randomUUID()}`, { draftForReview });
 
 const deleteOwnedMovementImage = async (imageUri: string | undefined) => {
   if (!isOwnedMovementImageUri(imageUri, FileSystem.documentDirectory)) return;
@@ -710,11 +714,13 @@ function MovementVisual({ movement, style, label, resizeMode }: {
   resizeMode?: "cover" | "contain";
 }) {
   const sourceId = movementSourceId(movement);
-  const usesManualArtwork = !movement.imageUri && sourceId.startsWith("manual-");
+  const hasAiArtwork = Boolean(aiMovementArtwork[sourceId]);
+  const showsBundledArtwork = !movement.imageUri && (hasAiArtwork || sourceId.startsWith("manual-"));
   const source = movement.imageUri ? { uri: movement.imageUri } : movementArtworkSource(movement);
+  const artworkMode = movement.imageUri ? "cover" : hasAiArtwork ? "contain" : movementArtworkMode(movement);
   return source ? (
-    <Image source={source} style={[style, usesManualArtwork && s.manualMovementVisual]}
-      resizeMode={resizeMode ?? (movement.imageUri ? "cover" : movementArtworkMode(movement))}
+    <Image source={source} style={[style, showsBundledArtwork && s.movementWhiteBackdrop]}
+      resizeMode={resizeMode ?? artworkMode}
       accessibilityLabel={label} />
   ) : (
     <View style={[style as StyleProp<ViewStyle>, s.pendingVisual]} accessibilityLabel={sourceId.startsWith("manual-") ? "No photo supplied in the manual" : "Movement visual pending"}>
@@ -1925,7 +1931,7 @@ function InstructorHome({
               }}
               style={[s.classCard, s.classCardShape]}
               accessibilityRole="button"
-              accessibilityLabel={`${slot.level} class at ${slot.time}, ${planTitle ?? slot.lesson}, ${completed ? "completed" : ready || inProgress ? inProgress ? "in progress" : "ready to teach" : hasDraft ? "draft available" : "plan needed"}`}
+              accessibilityLabel={`${scheduledClassLabel(slot)} class at ${slot.time}, ${planTitle ?? slot.lesson}, ${completed ? "completed" : ready || inProgress ? inProgress ? "in progress" : "ready to teach" : hasDraft ? "draft available" : "plan needed"}`}
             >
               <View
                 style={[
@@ -1939,7 +1945,7 @@ function InstructorHome({
                 <Text style={s.duration}>45 min</Text>
               </View>
               <View style={s.flex}>
-                <Text style={s.level}>{slot.level}</Text>
+                <Text style={s.level}>{scheduledClassLabel(slot)}</Text>
                 <Text style={s.week}>{planTitle ?? slot.lesson}</Text>
                 <Text style={s.duration}>
                   {classDateLabel(slot.date, true)}
@@ -2009,7 +2015,7 @@ function InstructorHome({
                 <View style={s.swipeActions}>
                   <Pressable
                     accessibilityRole="button"
-                    accessibilityLabel={`Reschedule ${slot.level} class`}
+                    accessibilityLabel={`Reschedule ${scheduledClassLabel(slot)} class`}
                     onPress={() => {
                       if (!swipeIsBlocked(slot.id)) modify(slot);
                     }}
@@ -2020,7 +2026,7 @@ function InstructorHome({
                   </Pressable>
                   <Pressable
                     accessibilityRole="button"
-                    accessibilityLabel={`Cancel ${slot.level} class`}
+                    accessibilityLabel={`Cancel ${scheduledClassLabel(slot)} class`}
                     onPress={() => {
                       if (!swipeIsBlocked(slot.id)) remove(slot);
                     }}
@@ -2077,7 +2083,7 @@ function AssignPlan({
       (candidate) =>
         candidate.status === "saved" &&
         classReadiness(candidate, library).ready &&
-        (!target || planLevel(candidate) === target.level),
+        (!target || bookingMatchesPlan(target, candidate)),
     )
     .filter(
       (candidate, index, candidates) =>
@@ -2092,7 +2098,7 @@ function AssignPlan({
       slot.status !== "CANCELLED" &&
       !isFinishedClass(slot) && slot.status !== "IN PROGRESS" &&
       isFutureScheduleSlot(slot, now) &&
-      slot.level === planLevel(plan),
+      bookingMatchesPlan(slot, plan),
   ).sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
   const nextAvailable = useMemo(
     () => nextAvailableClassSlot(schedule, now),
@@ -2129,7 +2135,7 @@ function AssignPlan({
             <CalendarDays size={21} color={C.rose} />
             <View style={s.flex}>
               <Text style={s.moveTitle}>
-                {target.level} / {target.lesson}
+                {scheduledClassLabel(target)} / {target.lesson}
               </Text>
               <Text style={s.sub}>
                 {classDateLabel(target.date, true)} at {target.time}
@@ -2196,7 +2202,7 @@ function AssignPlan({
                 {classDateLabel(nextAvailable.date, true)} at {nextAvailable.time}
               </Text>
               <Text style={s.sub}>
-                {planLevel(plan)} / 45 min / based on device time
+                {planLevel(plan)} {classTypeForEquipment(plan.brief.equipment)} / 45 min
               </Text>
             </View>
             <Pressable
@@ -2217,7 +2223,7 @@ function AssignPlan({
               <Pressable
                 key={slot.id}
                 accessibilityRole="button"
-                accessibilityLabel={`Assign plan to ${slot.level} class at ${slot.time}`}
+                accessibilityLabel={`Assign plan to ${scheduledClassLabel(slot)} class at ${slot.time}`}
                 disabled={occupied}
                 onPress={() => confirmAssignment(slot, plan)}
                 style={[s.assignCard, occupied && s.assignmentSelected]}
@@ -2227,7 +2233,7 @@ function AssignPlan({
                   <Text style={s.duration}>45 min</Text>
                 </View>
                 <View style={s.flex}>
-                  <Text style={s.moveTitle}>{slot.level}</Text>
+                  <Text style={s.moveTitle}>{scheduledClassLabel(slot)}</Text>
                   <Text style={s.sub}>{slot.lesson}</Text>
                   <Text style={s.duration}>{classDateLabel(slot.date, true)}</Text>
                 </View>
@@ -2271,6 +2277,7 @@ function ScheduleManager({
   const [date, setDate] = useState(dateKeyFromOffset(1));
   const [time, setTime] = useState("09:00");
   const [level, setLevel] = useState("Beginner");
+  const [classType, setClassType] = useState<ClassType>("Mat");
   const [lesson, setLesson] = useState(PROGRAM_DAY_OPTIONS[0]);
   const [error, setError] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -2310,6 +2317,7 @@ function ScheduleManager({
     setDate(dateKeyFromOffset(1));
     setTime("09:00");
     setLevel("Beginner");
+    setClassType("Mat");
     setLesson(PROGRAM_DAY_OPTIONS[0]);
     setError("");
   };
@@ -2320,6 +2328,7 @@ function ScheduleManager({
     setDate(slot.date);
     setTime(slot.time);
     setLevel(slot.level);
+    setClassType(slot.classType ?? "Mat");
     setLesson(normalizeProgramDay(slot.lesson));
     setError("");
   };
@@ -2366,10 +2375,11 @@ function ScheduleManager({
         ? rescheduleSlot(
             {
               ...existing,
-              ...(level !== existing.level
+              ...(level !== existing.level || classType !== (existing.classType ?? "Mat")
                 ? { planId: undefined, status: "NEEDS PLAN" as const }
                 : {}),
               level,
+              classType,
               lesson: lesson.trim() || "New class",
             },
             date,
@@ -2380,6 +2390,7 @@ function ScheduleManager({
             date,
             time: clean,
             level,
+            classType,
             lesson: lesson.trim() || "New class",
             status: "NEEDS PLAN",
           },
@@ -2457,6 +2468,7 @@ function ScheduleManager({
           {classDateLabel(date, true)} at {time || "--:--"} / Device time{" "}
           {timeFromMinutes(now.getHours() * 60 + now.getMinutes())}
         </Text>
+        <ClassTypePicker value={classType} onChange={setClassType} />
         <Text style={s.label}>LEVEL</Text>
         <View style={s.options}>
           {["Beginner", "Intermediate", "Advanced"].map((option) => (
@@ -2537,7 +2549,7 @@ function ScheduleManager({
             <Text style={s.duration}>45 min</Text>
           </View>
           <View style={s.flex}>
-            <Text style={s.moveTitle}>{slot.level}</Text>
+            <Text style={s.moveTitle}>{scheduledClassLabel(slot)}</Text>
             <Text style={s.sub}>{slot.lesson}</Text>
             <Text style={s.duration}>{classDateLabel(slot.date, true)}</Text>
           </View>
@@ -2551,7 +2563,7 @@ function ScheduleManager({
               <>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={`Add ${slot.level} class to calendar`}
+                accessibilityLabel={`Add ${scheduledClassLabel(slot)} class to calendar`}
                 onPress={() => void addClassToCalendar(slot, showAlert)}
                 hitSlop={10}
               >
@@ -2559,7 +2571,7 @@ function ScheduleManager({
               </Pressable>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={`Reschedule ${slot.level} class`}
+                accessibilityLabel={`Reschedule ${scheduledClassLabel(slot)} class`}
                 onPress={() => edit(slot)}
                 hitSlop={10}
               >
@@ -2573,8 +2585,8 @@ function ScheduleManager({
               accessibilityRole="button"
               accessibilityLabel={
                 slot.status === "CANCELLED"
-                  ? `Permanently delete cancelled ${slot.level} class`
-                  : `Cancel ${slot.level} class`
+                  ? `Permanently delete cancelled ${scheduledClassLabel(slot)} class`
+                  : `Cancel ${scheduledClassLabel(slot)} class`
               }
             >
               {slot.status === "CANCELLED" ? (
@@ -2699,6 +2711,30 @@ function PlanDisclosure({
     </View>
   );
 }
+function ClassTypePicker({
+  value,
+  onChange,
+}: {
+  value: ClassType;
+  onChange: (value: ClassType) => void;
+}) {
+  return (
+    <View style={s.selectGroup}>
+      <Text style={s.label}>CLASS TYPE</Text>
+      <View style={s.sequenceModes}>
+        {(["Mat", "Reformer"] as const).map((option) => (
+          <Pressable key={option} onPress={() => onChange(option)}
+            accessibilityRole="radio" accessibilityState={{ checked: value === option }}
+            accessibilityLabel={`${option} class type`}
+            style={[s.sequenceMode, value === option && s.sequenceModeOn]}>
+            <Text style={[s.planOptionText, value === option && s.roseText]}>{option}</Text>
+          </Pressable>
+        ))}
+      </View>
+    </View>
+  );
+}
+
 function Create({
   back,
   generate,
@@ -2731,15 +2767,19 @@ function Create({
     days.find((option) => option.toLowerCase() === initialDay?.toLowerCase()) ?? days[0],
   );
   const [energy, setEnergy] = useState("Flowing");
+  const [classType, setClassType] = useState<ClassType>(initialClass?.classType ?? "Mat");
   const [fromScratch, setFromScratch] = useState(false);
   const [equipment, setEquipment] = useState<string[]>(["Mat"]);
   const [showDetails, setShowDetails] = useState(false);
   const supportedEquipment = new Set(library.filter((movement) =>
+    classTypeForEquipment(movement.equipment) === "Mat" &&
     movement.reviewStatus === "reviewed" && levels.indexOf(movement.level as typeof level) <= levels.indexOf(level),
   ).flatMap((movement) => movementEquipment(movement.equipment).map((item) => item.toLowerCase())));
   const equipmentOptions = ["Mat", "Band", "Ball", "Ring"].filter((item) =>
     fromScratch || supportedEquipment.has(item.toLowerCase()));
-  const availableEquipment = equipment.filter((item) => equipmentOptions.includes(item));
+  const availableEquipment = classType === "Reformer"
+    ? ["Reformer"]
+    : equipment.filter((item) => equipmentOptions.includes(item));
 
   const submit = () => {
     if (!availableEquipment.length) {
@@ -2747,7 +2787,7 @@ function Create({
       return;
     }
     generate({
-      program: programs[level],
+      program: classType === "Reformer" ? `${level} Reformer` : programs[level],
       level,
       week,
       day,
@@ -2762,6 +2802,9 @@ function Create({
     <View style={s.flex}>
       <ScrollView contentContainerStyle={s.page}>
         <Header title="Create Class Plan" back={back} compact />
+        {initialClass
+          ? <Text style={s.sub}>{initialClass.classType ?? "Mat"} class</Text>
+          : <ClassTypePicker value={classType} onChange={setClassType} />}
         <View style={s.selectGroup}>
           <Text style={s.label}>START WITH</Text>
           <View style={s.sequenceModes}>
@@ -2780,7 +2823,9 @@ function Create({
             ))}
           </View>
           <Text style={s.sub}>
-            {fromScratch ? "Choose each movement yourself." : "Review and edit a ready-made sequence."}
+            {fromScratch ? "Choose each movement yourself."
+              : classType === "Reformer" ? "Review the starter movements before saving or teaching."
+              : "Review and edit a ready-made sequence."}
           </Text>
         </View>
         <View style={s.selectGroup}>
@@ -2799,7 +2844,7 @@ function Create({
             ))}
           </View>
         </View>
-        <View style={s.selectGroup}>
+        {classType === "Mat" ? <View style={s.selectGroup}>
           <Text style={s.label}>EQUIPMENT</Text>
           <View style={s.options}>
             {equipmentOptions.map((item) => {
@@ -2819,7 +2864,7 @@ function Create({
             })}
           </View>
           {!equipmentOptions.length ? <Text style={s.sub}>No reviewed equipment options for this level.</Text> : null}
-        </View>
+        </View> : null}
         <PlanDisclosure
           title="Lesson details"
           detail={`${week} · ${day} · ${energy}`}
@@ -3127,6 +3172,9 @@ function Classes({
   const { report: readiness, issues } = inspectClassReadiness(plan, library);
   const valid = readiness.ready;
   const mode = plan.sequenceMode ?? "auto";
+  const pendingMovementIds = useMemo(() => new Set(
+    library.filter((movement) => movement.reviewStatus === "needs-review").map((movement) => movement.id),
+  ), [library]);
   useEffect(() => {
     if (!valid) setShowChecks(true);
   }, [valid]);
@@ -3177,6 +3225,10 @@ function Classes({
     index < plan.movements.length - 1 && plan.movements[index + 1].phase === plan.movements[index].phase;
   const openMovementActions = (index: number) => {
     const actions: DialogAction[] = [];
+    const movement = plan.movements[index];
+    const source = library.find((item) => item.id === movementSourceId(movement));
+    if (source?.reviewStatus === "needs-review")
+      actions.push({ text: "Review Movement", onPress: () => reviewMovement(source, movement.phase) });
     if (canMoveEarlier(index)) actions.push({ text: "Move Earlier", onPress: () => move(index, -1) });
     if (canMoveLater(index)) actions.push({ text: "Move Later", onPress: () => move(index, 1) });
     actions.push(
@@ -3302,6 +3354,9 @@ function Classes({
               </View>
               <View style={s.flex}>
                 <Text style={s.moveTitle}>{movement.title}</Text>
+                {pendingMovementIds.has(movementSourceId(movement)) ? (
+                  <Text style={s.reviewBadge}>NEEDS REVIEW</Text>
+                ) : null}
                 {sideLabel(movement) ? <Text style={s.suggestionReason}>{sideLabel(movement)}</Text> : null}
                 <Text style={s.sub}>
                   {movement.position} · {fmt(movement.duration)}
@@ -3957,7 +4012,9 @@ function Details({
             />
             <Text style={s.detailArtworkPosition}>{movement.position}</Text>
             <View style={s.detailArtworkStep}>
-              <Text style={s.detailArtworkStepText}>DEMONSTRATION</Text>
+              <Text style={s.detailArtworkStepText}>
+                {!movement.imageUri && aiMovementArtwork[movement.id] ? "AI DEMONSTRATION" : "DEMONSTRATION"}
+              </Text>
             </View>
           </View>
           <View style={s.detailCardBody}>
@@ -4341,6 +4398,8 @@ const LibraryMovementRow = memo(function LibraryMovementRow({
 function Library({
   movements,
   favourites,
+  classType,
+  setClassType,
   planningPhase,
   planningPlan,
   query,
@@ -4358,6 +4417,8 @@ function Library({
 }: {
   movements: LibraryMovement[];
   favourites: string[];
+  classType: ClassType;
+  setClassType: (value: ClassType) => void;
   planningPhase?: Phase;
   planningPlan: ClassPlan;
   query: string;
@@ -4381,6 +4442,7 @@ function Library({
     const needle = deferredQuery.trim().toLowerCase();
     return movements.filter(
       (movement) =>
+        classTypeForEquipment(movement.equipment) === classType &&
         (!planningPhase || !movementCompatibility(planningPlan, movement, planningPhase).length) &&
         (filter === "All" ||
           (filter === "Favourites" && favouriteIds.has(movement.id)) ||
@@ -4398,7 +4460,7 @@ function Library({
             movement.level,
           ].some((value) => value.toLowerCase().includes(needle))),
     );
-  }, [deferredQuery, favouriteIds, filter, movements, planningPhase, planningPlan]);
+  }, [classType, deferredQuery, favouriteIds, filter, movements, planningPhase, planningPlan]);
   const resetScroll = () => {
     restoreOffset.current = 0;
     scrollOffset.current = 0;
@@ -4447,6 +4509,10 @@ function Library({
         </View>
       </View>
       {planningPhase ? <Text style={s.sub}>Movements for this phase and class level.</Text> : null}
+      {!planningPhase ? <ClassTypePicker value={classType} onChange={(value) => {
+        resetScroll();
+        setClassType(value);
+      }} /> : null}
       <View style={s.search}>
         <Search size={20} color={C.muted} />
         <TextInput
@@ -4528,18 +4594,20 @@ function Library({
 function CustomMovement({
   back,
   save,
+  initialClassType,
   initialPhase,
   initialMovement,
 }: {
   back: () => void;
   save: (movement: LibraryMovement) => void;
+  initialClassType: ClassType;
   initialPhase?: Phase;
   initialMovement?: LibraryMovement;
 }) {
   const [name, setName] = useState(initialMovement?.name ?? "");
   const [position, setPosition] = useState(initialMovement?.position ?? "Standing");
   const [level, setLevel] = useState(initialMovement?.level ?? "Beginner");
-  const [equipment, setEquipment] = useState(initialMovement?.equipment ?? "Mat");
+  const [equipment, setEquipment] = useState(initialMovement?.equipment ?? initialClassType);
   const [cue, setCue] = useState(initialMovement?.cues.join("\n") ?? "");
   const [phases, setPhases] = useState<Phase[]>(initialMovement?.phases ?? [initialPhase ?? "Main"]);
   const [sideMode, setSideMode] = useState<"together" | "paired" | "alternating">(initialMovement?.sideMode ?? "together");
@@ -4636,7 +4704,9 @@ function CustomMovement({
           ? initialMovement.reviewStatus === "needs-review" ? "Review Movement" : "Edit Movement"
           : "New Movement"} back={back} />
         <View style={s.form}>
-          <Text style={s.label}>MOVEMENT PHOTO</Text>
+          <Text style={s.label}>
+            {!imageUri && initialMovement && aiMovementArtwork[initialMovement.id] ? "AI-GENERATED DEMONSTRATION" : "MOVEMENT PHOTO"}
+          </Text>
           <View style={s.customImageFrame}>
             {imageUri || initialMovement ? (
               <MovementVisual
@@ -5868,6 +5938,7 @@ function TeachingSession({
   };
   const upcoming = movements[index + 1];
   const classLevel = planLevel(plan);
+  const classType = classTypeForEquipment(plan.brief.equipment);
   const currentUsesManualArtwork =
     !current.imageUri && movementSourceId(current).startsWith("manual-");
   const upcomingUsesManualArtwork = upcoming
@@ -5901,7 +5972,7 @@ function TeachingSession({
         </Pressable>
         <View style={s.flex}>
           <Text style={s.outlineText}>
-            {classLevel}
+            {classType === "Reformer" ? `${classLevel} Reformer` : classLevel}
           </Text>
           <Text style={[s.sub, s.teachSequence]}>
             {plan.brief.week} · {plan.brief.day}
@@ -6119,6 +6190,8 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
   const [libraryPlanPhase, setLibraryPlanPhase] = useState<Phase | undefined>();
   const [libraryNotice, setLibraryNotice] = useState("");
   const [libraryQuery, setLibraryQuery] = useState("");
+  const [libraryClassType, setLibraryClassType] = useState<ClassType>("Mat");
+  const [reviewingFromEditor, setReviewingFromEditor] = useState(false);
   const [libraryFilter, setLibraryFilter] = useState("All");
   const libraryScrollOffset = useRef(0);
   const desktop = Platform.OS === "web" && width >= 1080;
@@ -6466,6 +6539,7 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
         date: scheduledDate,
         time: scheduledTime,
         level: planLevel(saved),
+        classType: classTypeForEquipment(saved.brief.equipment),
         lesson: `${saved.brief.week} / ${saved.brief.day}`,
         status: "READY",
         planId: saved.id,
@@ -6488,6 +6562,7 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
         if (slot.status === "CANCELLED" || !scheduleSlotsOverlap(proposed, slot)) return false;
         const sameTime = slot.date === proposed.date && slot.time === proposed.time;
         const canAssign = sameTime && !isFinishedClass(slot) && slot.status !== "IN PROGRESS" &&
+          bookingMatchesPlan(slot, plan) &&
           (slot.id === assignmentSlotId || !slot.planId || slot.planId === plan.id);
         return !canAssign;
       });
@@ -6638,7 +6713,7 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
       (plan.id === planId && plan.status === "saved" ? plan : undefined);
     if (!targetSlot || isFinishedClass(targetSlot) || targetSlot.status === "CANCELLED" ||
         targetSlot.status === "IN PROGRESS" || !selectedPlan ||
-        planLevel(selectedPlan) !== targetSlot.level || !classReadiness(selectedPlan, libraryMovements).ready) return;
+        !bookingMatchesPlan(targetSlot, selectedPlan) || !classReadiness(selectedPlan, libraryMovements).ready) return;
     setSequenceHistory([]);
     setSequenceNotice("");
     setSchedule((current) =>
@@ -6663,6 +6738,7 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
       date,
       time,
       level: planLevel(plan),
+      classType: classTypeForEquipment(plan.brief.equipment),
       lesson: `${plan.brief.week} · ${plan.brief.day}`,
       status: "READY",
       planId: plan.id,
@@ -6677,7 +6753,7 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
     (planId === plan.id && plan.status === "saved" ? plan : undefined);
   const playablePlan = (slot: ScheduledClass) => {
     const assigned = findPlan(slot.planId);
-    if (assigned && planLevel(assigned) === slot.level && classReadiness(assigned, libraryMovements).ready)
+    if (assigned && bookingMatchesPlan(slot, assigned) && classReadiness(assigned, libraryMovements).ready)
       return assigned;
   };
   const openActiveTeachingSession = () => {
@@ -6767,7 +6843,7 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
       return;
     }
     const assignedPlan = findPlan(slot.planId);
-    if (!assignedPlan || planLevel(assignedPlan) !== slot.level) {
+    if (!assignedPlan || !bookingMatchesPlan(slot, assignedPlan)) {
       setAssignmentSlotId(slot.id);
       setSchedulePlanReturn("home");
       setScreen("assign");
@@ -6852,15 +6928,31 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
   };
   const saveCustomMovement = (movement: LibraryMovement) => {
     const reviewed = { ...movement, reviewedBy: account.name, reviewedAt: Date.now() };
-    const previousImageUri = libraryMovements.find(
+    const previousMovement = libraryMovements.find(
       (item) => item.id === movement.id,
-    )?.imageUri;
+    );
+    const previousImageUri = previousMovement?.imageUri;
     const nextLibraryMovements = [
       reviewed,
       ...libraryMovements.filter((item) => item.id !== movement.id),
     ];
-    const updateMovement = (current: ClassPlan) =>
-      fillMissingPlanCues(syncMovementImage(current, movement.id, movement.imageUri), [reviewed]);
+    const updateMovement = (current: ClassPlan) => {
+      const updated = fillMissingPlanCues(syncMovementImage(current, movement.id, movement.imageUri), [reviewed]);
+      if (current.status !== "draft" || previousMovement?.reviewStatus !== "needs-review" ||
+          classTypeForEquipment(previousMovement.equipment) !== "Reformer") return updated;
+      const movements = updated.movements.map((card) => movementSourceId(card) === reviewed.id
+        ? {
+          ...card,
+          title: card.title === previousMovement.name ? reviewed.name : card.title,
+          position: card.position === previousMovement.position ? reviewed.position : card.position,
+          cue: card.cue === previousMovement.cues[0] ? reviewed.cues[0] : card.cue,
+        }
+        : card);
+      return {
+        ...updated,
+        movements: updated.sequenceMode === "auto" ? orderMovementsByPosition(movements) : movements,
+      };
+    };
     const nextPlan = updateMovement(plan);
     const nextDraft = draftPlan ? updateMovement(draftPlan) : undefined;
     const nextSavedPlans = savedPlans.map(updateMovement);
@@ -6890,7 +6982,8 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
     setSelectedMovement(reviewed);
     setMovementToReview(undefined);
     setLibraryNotice(`${movement.name} saved to the library.`);
-    setScreen(libraryPlanPhase ? "details" : "library");
+    setScreen(reviewingFromEditor ? "editor" : libraryPlanPhase ? "details" : "library");
+    setReviewingFromEditor(false);
   };
   const deleteLibraryMovement = (movement: LibraryMovement) => {
     const deletedItem: RecentlyDeletedItem = {
@@ -6986,7 +7079,7 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
     );
     showUndo({
       kind: "cancelled",
-      message: `${scheduledClass.level} class cancelled.`,
+      message: `${scheduledClassLabel(scheduledClass)} class cancelled.`,
       scheduledClass,
     });
   };
@@ -7064,6 +7157,8 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
     setSequenceNotice("");
     setLibraryPlanPhase(undefined);
     setLibraryQuery("");
+    setLibraryClassType("Mat");
+    setReviewingFromEditor(false);
     setLibraryFilter("All");
     libraryScrollOffset.current = 0;
     setHomeDate(localDateKey());
@@ -7898,6 +7993,8 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
       } : undefined}
       movements={libraryMovements}
       favourites={favourites}
+      classType={libraryPlanPhase ? classTypeForEquipment(plan.brief.equipment) : libraryClassType}
+      setClassType={setLibraryClassType}
       planningPhase={libraryPlanPhase}
       planningPlan={plan}
       query={libraryQuery}
@@ -8288,7 +8385,7 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
             )}
             back={() => setScreen(classCreatorReturn)}
             generate={(brief, fromScratch) => {
-              const draft = createPlan(brief, fromScratch ? [] : libraryMovements);
+              const draft = createPlan(brief, fromScratch ? [] : libraryMovements, !fromScratch);
               if (!fromScratch && !draft.movements.length) {
                 confirmAction({
                   title: "No matching movements",
@@ -8389,7 +8486,8 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
             reviewMovement={(movement, phase) => {
               setSelectedMovement(movement);
               setMovementToReview(movement);
-              setLibraryPlanPhase(phase);
+              setEditorPhase(phase);
+              setReviewingFromEditor(true);
               setScreen("customMovement");
             }}
             undo={undoSequence}
@@ -8438,8 +8536,12 @@ function BlushBodiesApp({ setWideLayout }: { setWideLayout: (wide: boolean) => v
           <CustomMovement
             key={movementToReview?.id ?? "new"}
             initialMovement={movementToReview}
+            initialClassType={libraryPlanPhase ? classTypeForEquipment(plan.brief.equipment) : libraryClassType}
             initialPhase={libraryPlanPhase}
-            back={() => setScreen(movementToReview ? "details" : "library")}
+            back={() => {
+              setScreen(reviewingFromEditor ? "editor" : movementToReview ? "details" : "library");
+              setReviewingFromEditor(false);
+            }}
             save={saveCustomMovement}
           />
         ) : null}
@@ -8493,7 +8595,7 @@ const s = StyleSheet.create({
   readinessHeading: { flexDirection: "row", alignItems: "center", gap: 10 },
   readinessError: { color: C.rose, fontSize: 13, lineHeight: 20 },
   pendingVisual: { alignItems: "center", justifyContent: "center", backgroundColor: C.pale },
-  manualMovementVisual: { backgroundColor: C.white },
+  movementWhiteBackdrop: { backgroundColor: C.white },
   reviewBadge: { color: C.gold, fontSize: 10, fontWeight: "800", marginVertical: 3 },
   libraryPhase: { color: C.rose, fontSize: 10, fontWeight: "800", marginTop: 2 },
   libraryDuration: { alignItems: "flex-end", minWidth: 42 },

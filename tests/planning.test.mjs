@@ -5,9 +5,10 @@ import {
   fillMissingPlanCues, fitPhaseTiming, insertMovement, mergeLibraryCatalog, movementSourceId, nextPlanningPhase,
   orderMovementsByPosition, phaseRemaining, phaseTotal, positionGroup,
   sequenceForTeaching, sequenceWarnings, suggestMovements, updatePlanSequence,
-  classReadiness, inspectClassReadiness, movementCompatibility, planLevel, selectionDuration, sideLabel, syncMovementImage, workingSide, MOVEMENT_DURATION_SECONDS,
+  bookingMatchesPlan, classReadiness, inspectClassReadiness, movementCompatibility, planLevel, selectionDuration, sideLabel, syncMovementImage, workingSide, MOVEMENT_DURATION_SECONDS,
 } from "../src/planning.ts";
 import { additionalMovements, retiredMovementIds } from "../src/catalogue.ts";
+import { reformerMovements } from "../src/reformerCatalogue.ts";
 import { catalogueReplacementChoices, createCataloguePlan, replaceCatalogueMovement } from "../src/cataloguePlanning.ts";
 import {
   assignSchedulePlan, filterSchedule, isFutureScheduleSlot,
@@ -406,6 +407,8 @@ test("native and web calendar events keep the exact booking time and 45-minute d
   const googleUrl = new URL(googleCalendarUrl(scheduledClass));
   assert.equal(googleUrl.hostname, "calendar.google.com");
   assert.equal(googleUrl.searchParams.get("dates"), `${stamp(startDate)}/${stamp(endDate)}`);
+  assert.equal(classCalendarEvent({ ...scheduledClass, classType: "Reformer" }).title,
+    "Blush Bodies Beginner Reformer Class");
 });
 
 test("countdown cues play once at three, two and one seconds when enabled", () => {
@@ -904,6 +907,28 @@ test("readiness blocks a movement assigned outside its approved phases", () => {
   assert(report.errors.includes("main: main is not an approved phase."));
   source.phases = ["Main"];
   assert.equal(classReadiness(draft, [source]).ready, true);
+});
+
+test("Reformer drafts use their own library and require review before teaching", () => {
+  const library = [...additionalMovements, ...reformerMovements];
+  const matBrief = plan().brief;
+  const reformerBrief = { ...matBrief, equipment: ["Reformer"], level: "Beginner" };
+  const mat = createCataloguePlan(matBrief, library, "mat-only");
+  const reformer = createCataloguePlan(reformerBrief, library, "reformer-only", { draftForReview: true });
+  assert(classReadiness(mat, library).ready);
+  assert(mat.movements.every(move => move.sourceMovementId.startsWith("manual-")));
+  assert(reformer.movements.every(move => move.sourceMovementId.startsWith("reformer-")));
+  assert.equal(reformer.movements.reduce((total, move) => total + move.duration, 0), 2700);
+  assert.deepEqual(sequenceWarnings(reformer.movements), []);
+  assert(!classReadiness(reformer, library).ready);
+  assert(!classReadiness(reformer, additionalMovements).ready);
+  assert.equal(createCataloguePlan(reformerBrief, library, "approved-only").movements.length, 0);
+  const approvedLibrary = library.map(move => ({ ...move, reviewStatus: "reviewed" }));
+  assert(classReadiness(reformer, approvedLibrary).ready);
+  assert(bookingMatchesPlan({ level: "Beginner" }, mat));
+  assert(!bookingMatchesPlan({ level: "Beginner" }, reformer));
+  assert(!bookingMatchesPlan({ level: "Beginner", classType: "Reformer" }, mat));
+  assert(bookingMatchesPlan({ level: "Beginner", classType: "Reformer" }, reformer));
 });
 
 test("every manual card has a teaching cue and reference entries still require review", () => {
